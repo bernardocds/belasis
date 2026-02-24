@@ -1,0 +1,26 @@
+# Dependências
+node_modules/
+.npm/
+
+# Variáveis de ambiente — NUNCA subir isso!
+.env
+.env.local
+.env.*.local
+
+# Supabase local
+.supabase/
+supabase/.temp/
+
+# Logs de teste
+*.log
+test_connect_output.log
+
+# Cache do sistema
+.DS_Store
+.gemini/
+
+# Build
+dist/
+.next/
+deploy_workaround/
+db_setup/
