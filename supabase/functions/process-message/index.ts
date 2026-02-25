@@ -76,15 +76,20 @@ serve(async (req) => {
       `Responda de forma clara, humanizada e profissional. ` +
       `Ajude com agendamentos, informações e dúvidas gerais.`;
 
-    const systemPrompt = systemPromptBase + 
-    `\n\nINSTRUÇÕES DE AGENDAMENTO:
+    const systemPrompt = systemPromptBase +
+      `\n\nINSTRUÇÕES DE AGENDAMENTO:
 Quando o paciente quiser marcar uma consulta, você DEVE coletar as seguintes informações:
 1. Nome completo.
 2. Data e hora desejada para o agendamento.
 3. Qual o procedimento ou motivo da consulta.
 O telefone já possuímos. Assim que você tiver todas essas informações confirmadas pelo paciente, VOCÊ DEVE EXECUTAR A FUNÇÃO "agendar_consulta" para salvar o agendamento no sistema. 
 IMPORTANTE: Nunca invente horários. Confirme sempre o horário exato que o paciente quer antes de invocar a função.
-A data e hora enviadas para a função devem estar no formato ISO 8601 (ex: 2024-03-10T14:30:00-03:00). A data atual é ${new Date().toISOString()}.`;
+A data e hora enviadas para a função devem estar no formato ISO 8601 (ex: 2024-03-10T14:30:00-03:00). A data atual é ${new Date().toISOString()}.
+
+INSTRUÇÕES DE CONSULTA E CANCELAMENTO:
+Quando o paciente quiser ver suas consultas agendadas, USE A FUNÇÃO "consultar_agendamentos" para buscar no banco de dados.
+Quando o paciente quiser cancelar uma consulta, PRIMEIRO use "consultar_agendamentos" para listar as consultas, apresente elas numeradas ao paciente, e após a confirmação de qual deseja cancelar, use "cancelar_agendamento" com o ID da consulta.
+Sempre peça confirmação do paciente antes de cancelar.`;
 
     // ── 3. Fetch conversation history (last 15 messages for context) ─────────
     const { data: history, error: historyError } = await supabaseAdmin
@@ -127,6 +132,33 @@ A data e hora enviadas para a função devem estar no formato ISO 8601 (ex: 2024
             required: ["nome_paciente", "data_hora_iso", "procedimento_esperado"]
           }
         }
+      },
+      {
+        type: "function",
+        function: {
+          name: "consultar_agendamentos",
+          description: "Busca os agendamentos existentes do paciente na clínica pelo número de telefone. Use quando o paciente perguntar quais consultas tem agendadas ou quiser cancelar.",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: []
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "cancelar_agendamento",
+          description: "Cancela um agendamento específico pelo seu ID. Use SOMENTE após consultar os agendamentos e o paciente confirmar qual deseja cancelar.",
+          parameters: {
+            type: "object",
+            properties: {
+              agendamento_id: { type: "string", description: "O ID (UUID) do agendamento a ser cancelado" },
+              motivo: { type: "string", description: "Motivo do cancelamento informado pelo paciente" }
+            },
+            required: ["agendamento_id"]
+          }
+        }
       }
     ];
 
@@ -160,81 +192,119 @@ A data e hora enviadas para a função devem estar no formato ISO 8601 (ex: 2024
     // ── 5. Handle Function Calling (Agendamento no BD) ────────────────────────
     if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
       console.log('AI invoked tools:', responseMessage.tool_calls);
-      
+
       messagesForAI.push(responseMessage); // append assistant tool call message to history
 
       for (const toolCall of responseMessage.tool_calls) {
+        let toolResponseText = "";
+        const recipientPhone = conversa.paciente_telefone.replace('@s.whatsapp.net', '').replace('@c.us', '');
+
         if (toolCall.function.name === 'agendar_consulta') {
           const args: AgendarConsultaData = JSON.parse(toolCall.function.arguments);
-          let toolResponseText = "";
 
           try {
-            // Check if patient exists by phone
             let paciente_id = null;
-            const recipientPhone = conversa.paciente_telefone.replace('@s.whatsapp.net', '').replace('@c.us', '');
-            
-            let { data: patientData, error: patientSearchError } = await supabaseAdmin
+
+            let { data: patientData } = await supabaseAdmin
               .from('pacientes')
               .select('id')
               .eq('clinic_id', conversa.clinic_id)
               .eq('telefone', recipientPhone)
               .maybeSingle();
-              
+
             if (!patientData) {
-              // Create new patient
-               const { data: newPatient, error: newPatientError } = await supabaseAdmin
+              const { data: newPatient, error: newPatientError } = await supabaseAdmin
                 .from('pacientes')
-                .insert({
-                  clinic_id: conversa.clinic_id,
-                  nome: args.nome_paciente,
-                  telefone: recipientPhone
-                })
+                .insert({ clinic_id: conversa.clinic_id, nome: args.nome_paciente, telefone: recipientPhone })
                 .select('id')
                 .single();
-                
               if (newPatientError) throw new Error("Erro ao criar paciente: " + newPatientError.message);
               paciente_id = newPatient.id;
             } else {
               paciente_id = patientData.id;
-              // update existing patient name if provided
               await supabaseAdmin.from('pacientes').update({ nome: args.nome_paciente }).eq('id', paciente_id);
             }
 
-            // Insert Appointment
-            const { error: insertAppointmentError } = await supabaseAdmin
+            const { error: insertErr } = await supabaseAdmin
               .from('agendamentos')
               .insert({
-                clinic_id: conversa.clinic_id,
-                conversa_id: conversa_id,
-                paciente_id: paciente_id,
-                duracao_min: args.duracao_minutos || 30,
-                observacao: args.procedimento_esperado,
-                data_hora: args.data_hora_iso,
-                status: 'marcado',
-                paciente_nome: args.nome_paciente, // fallback 
-                paciente_telefone: recipientPhone // fallback
+                clinic_id: conversa.clinic_id, conversa_id, paciente_id,
+                duracao_min: args.duracao_minutos || 30, observacao: args.procedimento_esperado,
+                data_hora: args.data_hora_iso, status: 'marcado',
+                paciente_nome: args.nome_paciente, paciente_telefone: recipientPhone
               });
+            if (insertErr) throw new Error("Erro ao agendar: " + insertErr.message);
 
-            if (insertAppointmentError) {
-              throw new Error("Erro de banco de dados ao agendar: " + insertAppointmentError.message);
-            }
-            
             toolResponseText = `O agendamento foi realizado com sucesso no sistema para o dia ${args.data_hora_iso}.`;
             console.log("Agendamento criado via Tool com sucesso!");
-
           } catch (e: any) {
-            console.error("Tool execution failed: ", e);
-            toolResponseText = "Falha ao gravar agendamento no sistema. Diga que ocorreu um erro interno e peça para tentar mais tarde.";
+            console.error("Tool agendar_consulta failed:", e);
+            toolResponseText = "Falha ao gravar agendamento. Diga que ocorreu um erro interno e peça para tentar mais tarde.";
           }
 
-          // Push the tool result to OpenAI to get the final humanized text response
-          messagesForAI.push({
-            tool_call_id: toolCall.id,
-            role: "tool",
-            name: toolCall.function.name,
-            content: toolResponseText,
-          });
+        } else if (toolCall.function.name === 'consultar_agendamentos') {
+          try {
+            const { data: agendamentos, error: agError } = await supabaseAdmin
+              .from('agendamentos')
+              .select('id, data_hora, status, observacao, paciente_nome, duracao_min')
+              .eq('clinic_id', conversa.clinic_id)
+              .eq('paciente_telefone', recipientPhone)
+              .in('status', ['marcado', 'confirmado'])
+              .order('data_hora', { ascending: true });
+
+            if (agError) throw new Error("Erro ao buscar agendamentos: " + agError.message);
+
+            if (!agendamentos || agendamentos.length === 0) {
+              toolResponseText = "O paciente não possui nenhum agendamento ativo no momento.";
+            } else {
+              const lista = agendamentos.map((a: any, i: number) => {
+                const dt = new Date(a.data_hora);
+                const dataFormatada = dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+                return `${i + 1}. Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} [ref:${a.id}]`;
+              }).join('\n');
+              toolResponseText = `Agendamentos encontrados:\n${lista}\n\nIMPORTANTE: Ao apresentar ao paciente, mostre APENAS o número, data e procedimento. NÃO mostre o código [ref:...], ele é apenas para uso interno.`;
+            }
+            console.log("Consulta de agendamentos realizada!");
+          } catch (e: any) {
+            console.error("Tool consultar_agendamentos failed:", e);
+            toolResponseText = "Falha ao buscar agendamentos. Diga que ocorreu um erro interno.";
+          }
+
+        } else if (toolCall.function.name === 'cancelar_agendamento') {
+          const args = JSON.parse(toolCall.function.arguments);
+          try {
+            const { data: agendamento, error: findErr } = await supabaseAdmin
+              .from('agendamentos')
+              .select('id, paciente_telefone, data_hora, observacao')
+              .eq('id', args.agendamento_id)
+              .eq('clinic_id', conversa.clinic_id)
+              .single();
+
+            if (findErr || !agendamento) throw new Error("Agendamento não encontrado.");
+            if (agendamento.paciente_telefone !== recipientPhone) throw new Error("Este agendamento pertence a outro paciente.");
+
+            const { error: updateErr } = await supabaseAdmin
+              .from('agendamentos')
+              .update({ status: 'cancelado', observacao: `${agendamento.observacao || ''} [CANCELADO: ${args.motivo || 'a pedido do paciente'}]` })
+              .eq('id', args.agendamento_id);
+
+            if (updateErr) throw new Error("Erro ao cancelar: " + updateErr.message);
+
+            toolResponseText = `Agendamento cancelado com sucesso. (ID: ${args.agendamento_id})`;
+            console.log("Agendamento cancelado via Tool!");
+          } catch (e: any) {
+            console.error("Tool cancelar_agendamento failed:", e);
+            toolResponseText = `Falha ao cancelar agendamento: ${e.message}`;
+          }
         }
+
+        // Push the tool result to OpenAI
+        messagesForAI.push({
+          tool_call_id: toolCall.id,
+          role: "tool",
+          name: toolCall.function.name,
+          content: toolResponseText,
+        });
       }
 
       // Second call to OpenAI with tool results
@@ -281,7 +351,12 @@ A data e hora enviadas para a função devem estar no formato ISO 8601 (ex: 2024
     }
 
     const recipientFormatPhone = conversa.paciente_telefone.replace('@s.whatsapp.net', '').replace('@c.us', '');
-    const instanceName = conversa.clinic_id;
+
+    // Map clinic_id back to the Evolution API instance name
+    const CLINIC_TO_INSTANCE: Record<string, string> = {
+      '06a40c64-48a4-4836-a3ea-8a8ced0492e4': 'ca57fb17-5661-4c85-9d1a-853720c8acff',
+    };
+    const instanceName = CLINIC_TO_INSTANCE[conversa.clinic_id] || conversa.clinic_id;
 
     const sendRes = await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
       method: 'POST',

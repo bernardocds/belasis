@@ -1,0 +1,25 @@
+
+# webhook-evolution: receives webhooks from Evolution API (no JWT)
+[functions.webhook-evolution]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/webhook-evolution/index.ts"
+
+# webhook-whatsapp: legacy, kept for reference but not actively used
+[functions.webhook-whatsapp]
+enabled = true
+verify_jwt = false
+import_map = "./functions/webhook-whatsapp/deno.json"
+entrypoint = "./functions/webhook-whatsapp/index.ts"
+
+# process-message: called by Supabase DB Hook after INSERT on mensagens (no JWT)
+[functions.process-message]
+enabled = true
+verify_jwt = false
+import_map = "./functions/process-message/deno.json"
+entrypoint = "./functions/process-message/index.ts"
+
+# connect-whatsapp: called by frontend with user JWT (auth required)
+[functions.connect-whatsapp]
+enabled = true
+verify_jwt = false
