@@ -52,6 +52,29 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
+    // ── 0. Message concatenation debounce ──────────────────────────────────
+    // Wait 15 seconds to allow multiple rapid messages to arrive
+    await new Promise(resolve => setTimeout(resolve, 15000));
+
+    // Check if THIS message is still the latest user message in the conversation
+    const { data: latestMsg } = await supabaseAdmin
+      .from('mensagens')
+      .select('id')
+      .eq('conversa_id', conversa_id)
+      .eq('role', 'user')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (latestMsg && latestMsg.id !== messageId) {
+      // A newer message exists — skip this one, the newer one will handle the batch
+      console.log('Skipping: newer message exists, this will be concatenated.');
+      return new Response(JSON.stringify({ ignored: 'concatenated' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      });
+    }
+
     // ── 1. Fetch the conversation ────────────────────────────────────────────
     const { data: conversa, error: conversaError } = await supabaseAdmin
       .from('conversas')
@@ -61,6 +84,15 @@ serve(async (req) => {
 
     if (conversaError || !conversa) {
       throw new Error('Conversa not found: ' + conversa_id);
+    }
+
+    // ── HANDOFF GUARD: skip AI if conversation is transferred to human ────
+    if (conversa.status === 'handoff') {
+      console.log('Conversa in handoff mode, skipping AI processing.');
+      return new Response(JSON.stringify({ ignored: 'handoff_mode' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      });
     }
 
     // ── 2. Fetch the clinic's custom AI prompt ───────────────────────────────
@@ -78,18 +110,18 @@ serve(async (req) => {
 
     const systemPrompt = systemPromptBase +
       `\n\nINSTRUÇÕES DE AGENDAMENTO:
-Quando o paciente quiser marcar uma consulta, você DEVE coletar as seguintes informações:
-1. Nome completo.
-2. Data e hora desejada para o agendamento.
-3. Qual o procedimento ou motivo da consulta.
-O telefone já possuímos. Assim que você tiver todas essas informações confirmadas pelo paciente, VOCÊ DEVE EXECUTAR A FUNÇÃO "agendar_consulta" para salvar o agendamento no sistema. 
-IMPORTANTE: Nunca invente horários. Confirme sempre o horário exato que o paciente quer antes de invocar a função.
-A data e hora enviadas para a função devem estar no formato ISO 8601 (ex: 2024-03-10T14:30:00-03:00). A data atual é ${new Date().toISOString()}.
+Quando o paciente quiser marcar uma consulta, você DEVE coletar: 1) Nome completo, 2) Data e hora, 3) Procedimento/motivo.
+O telefone já possuímos. Com tudo confirmado, EXECUTE "agendar_consulta".
+Nunca invente horários. Formato ISO 8601 (ex: 2024-03-10T14:30:00-03:00). Data atual: ${new Date().toISOString()}.
 
-INSTRUÇÕES DE CONSULTA E CANCELAMENTO:
-Quando o paciente quiser ver suas consultas agendadas, USE A FUNÇÃO "consultar_agendamentos" para buscar no banco de dados.
-Quando o paciente quiser cancelar uma consulta, PRIMEIRO use "consultar_agendamentos" para listar as consultas, apresente elas numeradas ao paciente, e após a confirmação de qual deseja cancelar, use "cancelar_agendamento" com o ID da consulta.
-Sempre peça confirmação do paciente antes de cancelar.`;
+CONSULTA E CANCELAMENTO:
+- Para ver consultas: USE "consultar_agendamentos"
+- Para cancelar: PRIMEIRO consulte, mostre a lista (SEM o código ref), peça confirmação, depois use "cancelar_agendamento"
+- Para reagendar: PRIMEIRO consulte, identifique qual, peça a nova data/hora, depois use "reagendar_consulta"
+
+HANDOFF PARA HUMANO:
+Se o paciente pedir para falar com um humano/atendente, ou se você não souber resolver o problema, USE "solicitar_atendente".
+Após transferir, diga que um atendente vai entrar em contato em breve.`;
 
     // ── 3. Fetch conversation history (last 15 messages for context) ─────────
     const { data: history, error: historyError } = await supabaseAdmin
@@ -157,6 +189,35 @@ Sempre peça confirmação do paciente antes de cancelar.`;
               motivo: { type: "string", description: "Motivo do cancelamento informado pelo paciente" }
             },
             required: ["agendamento_id"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "reagendar_consulta",
+          description: "Altera a data/hora de um agendamento existente. Use após consultar os agendamentos e o paciente informar a nova data.",
+          parameters: {
+            type: "object",
+            properties: {
+              agendamento_id: { type: "string", description: "O ID do agendamento a ser reagendado" },
+              nova_data_hora_iso: { type: "string", description: "Nova data e hora em formato ISO 8601" }
+            },
+            required: ["agendamento_id", "nova_data_hora_iso"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "solicitar_atendente",
+          description: "Transfere a conversa para um atendente humano. Use quando o paciente pedir explicitamente para falar com uma pessoa ou quando você não conseguir resolver o problema.",
+          parameters: {
+            type: "object",
+            properties: {
+              motivo: { type: "string", description: "Motivo da transferência" }
+            },
+            required: ["motivo"]
           }
         }
       }
@@ -281,7 +342,7 @@ Sempre peça confirmação do paciente antes de cancelar.`;
               .single();
 
             if (findErr || !agendamento) throw new Error("Agendamento não encontrado.");
-            if (agendamento.paciente_telefone !== recipientPhone) throw new Error("Este agendamento pertence a outro paciente.");
+            if (agendamento.paciente_telefone !== recipientPhone) throw new Error("Agendamento pertence a outro paciente.");
 
             const { error: updateErr } = await supabaseAdmin
               .from('agendamentos')
@@ -290,11 +351,52 @@ Sempre peça confirmação do paciente antes de cancelar.`;
 
             if (updateErr) throw new Error("Erro ao cancelar: " + updateErr.message);
 
-            toolResponseText = `Agendamento cancelado com sucesso. (ID: ${args.agendamento_id})`;
+            toolResponseText = `Agendamento cancelado com sucesso.`;
             console.log("Agendamento cancelado via Tool!");
           } catch (e: any) {
             console.error("Tool cancelar_agendamento failed:", e);
             toolResponseText = `Falha ao cancelar agendamento: ${e.message}`;
+          }
+
+        } else if (toolCall.function.name === 'reagendar_consulta') {
+          const args = JSON.parse(toolCall.function.arguments);
+          try {
+            const { data: agendamento, error: findErr } = await supabaseAdmin
+              .from('agendamentos')
+              .select('id, paciente_telefone, data_hora, observacao')
+              .eq('id', args.agendamento_id)
+              .eq('clinic_id', conversa.clinic_id)
+              .single();
+
+            if (findErr || !agendamento) throw new Error("Agendamento não encontrado.");
+            if (agendamento.paciente_telefone !== recipientPhone) throw new Error("Agendamento pertence a outro paciente.");
+
+            const { error: updateErr } = await supabaseAdmin
+              .from('agendamentos')
+              .update({ data_hora: args.nova_data_hora_iso, observacao: `${agendamento.observacao || ''} [Reagendado de ${agendamento.data_hora}]` })
+              .eq('id', args.agendamento_id);
+
+            if (updateErr) throw new Error("Erro ao reagendar: " + updateErr.message);
+            toolResponseText = `Agendamento reagendado com sucesso para ${args.nova_data_hora_iso}.`;
+            console.log("Agendamento reagendado via Tool!");
+          } catch (e: any) {
+            console.error("Tool reagendar_consulta failed:", e);
+            toolResponseText = `Falha ao reagendar: ${e.message}`;
+          }
+
+        } else if (toolCall.function.name === 'solicitar_atendente') {
+          const args = JSON.parse(toolCall.function.arguments);
+          try {
+            await supabaseAdmin
+              .from('conversas')
+              .update({ status: 'handoff', handoff_motivo: args.motivo || 'Solicitado pelo paciente' })
+              .eq('id', conversa_id);
+
+            toolResponseText = `Conversa transferida para atendente humano. Motivo: ${args.motivo || 'solicitado pelo paciente'}`;
+            console.log("Handoff realizado!");
+          } catch (e: any) {
+            console.error("Tool solicitar_atendente failed:", e);
+            toolResponseText = `Falha ao transferir: ${e.message}`;
           }
         }
 

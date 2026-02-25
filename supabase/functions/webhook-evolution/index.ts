@@ -121,16 +121,90 @@ serve(async (req) => {
             });
         }
 
-        // Extract message content (supports text, extended text, image/video captions)
+        // Extract message content and media ─────────────────────────────────────
         const msgObj = data?.message;
-        const content: string =
-            msgObj?.conversation ||
-            msgObj?.extendedTextMessage?.text ||
-            msgObj?.imageMessage?.caption ||
-            msgObj?.videoMessage?.caption ||
-            '[mídia não suportada]';
+        const messageType = data?.messageType || 'unknown';
+        let content = '';
+        let mediaUrl: string | null = null;
+        let mediaType: string | null = null;
 
-        console.log('Message from:', patientPhone, '| clinic:', instanceName, '| content:', content);
+        // Text messages
+        if (msgObj?.conversation) {
+            content = msgObj.conversation;
+        } else if (msgObj?.extendedTextMessage?.text) {
+            content = msgObj.extendedTextMessage.text;
+        }
+        // Image
+        else if (msgObj?.imageMessage) {
+            content = msgObj.imageMessage.caption || '📷 Imagem';
+            mediaType = 'image';
+            mediaUrl = msgObj.imageMessage.url || msgObj.imageMessage.directPath || null;
+            if (data?.message?.base64) mediaUrl = `data:${msgObj.imageMessage.mimetype};base64,${data.message.base64}`;
+        }
+        // Audio / Voice note
+        else if (msgObj?.audioMessage) {
+            content = '🎵 Áudio';
+            mediaType = msgObj.audioMessage.ptt ? 'voice' : 'audio';
+            mediaUrl = msgObj.audioMessage.url || msgObj.audioMessage.directPath || null;
+            if (data?.message?.base64) mediaUrl = `data:${msgObj.audioMessage.mimetype};base64,${data.message.base64}`;
+        }
+        // Video
+        else if (msgObj?.videoMessage) {
+            content = msgObj.videoMessage.caption || '🎥 Vídeo';
+            mediaType = 'video';
+            mediaUrl = msgObj.videoMessage.url || msgObj.videoMessage.directPath || null;
+            if (data?.message?.base64) mediaUrl = `data:${msgObj.videoMessage.mimetype};base64,${data.message.base64}`;
+        }
+        // Document
+        else if (msgObj?.documentMessage) {
+            content = `📎 ${msgObj.documentMessage.fileName || 'Documento'}`;
+            mediaType = 'document';
+            mediaUrl = msgObj.documentMessage.url || msgObj.documentMessage.directPath || null;
+            if (data?.message?.base64) mediaUrl = `data:${msgObj.documentMessage.mimetype};base64,${data.message.base64}`;
+        }
+        // Sticker
+        else if (msgObj?.stickerMessage) {
+            content = '🏷️ Figurinha';
+            mediaType = 'sticker';
+            mediaUrl = msgObj.stickerMessage.url || msgObj.stickerMessage.directPath || null;
+            if (data?.message?.base64) mediaUrl = `data:${msgObj.stickerMessage.mimetype};base64,${data.message.base64}`;
+        }
+        // Contact
+        else if (msgObj?.contactMessage) {
+            content = `👤 Contato: ${msgObj.contactMessage.displayName || 'sem nome'}`;
+            mediaType = 'contact';
+        }
+        // Contact array
+        else if (msgObj?.contactsArrayMessage) {
+            const names = msgObj.contactsArrayMessage.contacts?.map((c: any) => c.displayName).join(', ') || '';
+            content = `👥 Contatos: ${names}`;
+            mediaType = 'contact';
+        }
+        // Location
+        else if (msgObj?.locationMessage) {
+            content = `📍 Localização: ${msgObj.locationMessage.degreesLatitude}, ${msgObj.locationMessage.degreesLongitude}`;
+            mediaType = 'location';
+        }
+        // Link preview
+        else if (msgObj?.extendedTextMessage?.matchedText) {
+            content = msgObj.extendedTextMessage.text || msgObj.extendedTextMessage.matchedText;
+            mediaType = 'link';
+        }
+        // Reaction (ignore)
+        else if (msgObj?.reactionMessage) {
+            console.log('Ignored: reaction message');
+            return new Response(JSON.stringify({ ignored: 'reaction' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 200,
+            });
+        }
+        // Fallback
+        else {
+            content = `[${messageType}]`;
+            mediaType = messageType;
+        }
+
+        console.log('Message from:', patientPhone, '| type:', mediaType || 'text', '| content:', content.substring(0, 80));
 
         // ── Find or Create Conversation ──────────────────────────────────────────
         const { data: conversaList, error: conversaError } = await supabaseAdmin
@@ -165,13 +239,82 @@ serve(async (req) => {
         }
 
         // ── Save Message (triggers DB Hook → process-message) ───────────────────
-        const { error: msgError } = await supabaseAdmin
+        const { data: savedMsg, error: msgError } = await supabaseAdmin
             .from('mensagens')
-            .insert({ conversa_id: conversaId, role: 'user', conteudo: content });
+            .insert({
+                conversa_id: conversaId,
+                role: 'user',
+                conteudo: content,
+                media_url: mediaUrl,
+                media_type: mediaType,
+            })
+            .select('id')
+            .single();
 
         if (msgError) throw new Error('Erro ao salvar mensagem: ' + msgError.message);
 
         console.log('✅ Message saved! conversa_id:', conversaId);
+
+        // ── Update last_user_msg_at for concatenation debounce ──────────────────
+        await supabaseAdmin
+            .from('conversas')
+            .update({ last_user_msg_at: new Date().toISOString() })
+            .eq('id', conversaId);
+
+        // ── Auto-transcribe audio messages ──────────────────────────────────────
+        if ((mediaType === 'audio' || mediaType === 'voice') && mediaUrl && savedMsg?.id) {
+            try {
+                console.log('🎙️ Transcribing audio...');
+                const transcribeRes = await fetch(
+                    Deno.env.get('SUPABASE_URL') + '/functions/v1/transcribe-audio',
+                    {
+                        method: 'POST',
+                        headers: { 'Authorization': 'Bearer ' + Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ audio_url: mediaUrl, mensagem_id: savedMsg.id }),
+                    }
+                );
+                const transcribeData = await transcribeRes.json();
+                if (transcribeData.transcricao) {
+                    console.log('✅ Audio transcribed:', transcribeData.transcricao.substring(0, 80));
+                    // Update message content with transcription for AI context
+                    await supabaseAdmin
+                        .from('mensagens')
+                        .update({ conteudo: `🎵 Áudio: "${transcribeData.transcricao}"` })
+                        .eq('id', savedMsg.id);
+                }
+            } catch (e) {
+                console.error('Transcription failed (non-blocking):', String(e));
+            }
+        }
+
+        // ── Save media to documentos_paciente (prontuário) ──────────────────────
+        if (mediaUrl && (mediaType === 'image' || mediaType === 'document')) {
+            try {
+                // Find paciente by phone
+                const { data: paciente } = await supabaseAdmin
+                    .from('pacientes')
+                    .select('id')
+                    .eq('clinic_id', instanceName)
+                    .eq('telefone', patientPhone)
+                    .single();
+
+                if (paciente) {
+                    const docTipo = mediaType === 'image' ? 'imagem' : 'documento';
+                    await supabaseAdmin.from('documentos_paciente').insert({
+                        clinic_id: instanceName,
+                        paciente_id: paciente.id,
+                        nome: content || (mediaType === 'image' ? 'Imagem WhatsApp' : 'Documento WhatsApp'),
+                        tipo: docTipo,
+                        url: mediaUrl,
+                        mime_type: null,
+                        origem: 'whatsapp',
+                    });
+                    console.log('📎 Media saved to prontuário for paciente:', paciente.id);
+                }
+            } catch (e) {
+                console.error('Media save to prontuário failed (non-blocking):', String(e));
+            }
+        }
 
         return new Response(JSON.stringify({ ok: true, conversa_id: conversaId }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
