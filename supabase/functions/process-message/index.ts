@@ -661,11 +661,8 @@ Se o paciente pedir para falar com um humano/atendente, ou se você não souber 
 
     const recipientFormatPhone = conversa.paciente_telefone.replace('@s.whatsapp.net', '').replace('@c.us', '');
 
-    // Map clinic_id back to the Evolution API instance name
-    const CLINIC_TO_INSTANCE: Record<string, string> = {
-      '06a40c64-48a4-4836-a3ea-8a8ced0492e4': 'ca57fb17-5661-4c85-9d1a-853720c8acff',
-    };
-    const instanceName = CLINIC_TO_INSTANCE[conversa.clinic_id] || conversa.clinic_id;
+    // A instância na Evolution API usa o próprio clinic_id como nome
+    const instanceName = conversa.clinic_id;
 
     const sendRes = await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
       method: 'POST',
