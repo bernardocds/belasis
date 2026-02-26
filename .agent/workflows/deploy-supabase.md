@@ -11,24 +11,20 @@ Este workflow faz o deploy de Edge Functions contornando o sandbox do macOS que 
 ## Pré-requisitos
 - Node.js instalado
 - Biblioteca `pg` instalada em `db_setup/`
-- Access Token do Supabase: usar `sbp_f80fc5a670dae2d639541fe640c722444817656e`
+- Access Token do Supabase: substitua `<SEU_SUPABASE_ACCESS_TOKEN>` pelo seu token real ou use variável de ambiente, NUNCA commite o token no arquivo.
 
 ## Passos
 
-1. Editar o código-fonte da função em `supabase/functions/<NOME>/index.ts`
-
-2. Fazer deploy via API (substituir `<NOME>` pelo slug da função):
+1. Editar o código-fonte da function em `supabase/functions/<NOME>/index.ts`
+2. Certifique-se de ter o `supabase-cli` instalado (`brew install supabase/tap/supabase` ou via npx)
+3. Fazer login no Supabase CLI:
 ```bash
-cd /Users/bernardo/Desktop/belasis-main/db_setup && node -e "
-const fs = require('fs');
-const https = require('https');
-const path = require('path');
-const slug = process.argv[1];
-const code = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'functions', slug, 'index.ts'), 'utf8');
-const body = JSON.stringify({ body: code, slug: slug, name: slug, verify_jwt: false, entrypoint_path: 'index.ts', import_map: false });
-const req = https.request({ hostname: 'api.supabase.com', port: 443, path: '/v1/projects/fvxxlrzaqqewihuabcxu/functions/' + slug, method: 'PATCH', headers: { 'Authorization': 'Bearer sbp_f80fc5a670dae2d639541fe640c722444817656e', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }}, (res) => { let d=''; res.on('data', c => d+=c); res.on('end', () => console.log(res.statusCode === 200 ? '✅ Deploy OK! ' + slug : '❌ Erro: ' + d)); });
-req.write(body); req.end();
-" <NOME>
+npx supabase login --token <SEU_SUPABASE_ACCESS_TOKEN>
+```
+
+4. Fazer deploy:
+```bash
+npx supabase functions deploy <NOME> --project-ref fvxxlrzaqqewihuabcxu --no-verify-jwt
 ```
 
 3. Para executar SQL no banco de dados:
