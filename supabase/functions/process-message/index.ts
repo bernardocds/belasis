@@ -135,6 +135,11 @@ CONSULTA E CANCELAMENTO:
 - Para cancelar: PRIMEIRO consulte, mostre a lista (SEM o código ref), peça confirmação, depois use "cancelar_agendamento"
 - Para reagendar: PRIMEIRO consulte, identifique qual, peça a nova data/hora, depois use "reagendar_consulta"
 
+CONFIRMAÇÃO DE CONSULTA:
+- Quando o paciente responder confirmando presença (ex: "sim", "ok", "confirmado", "pode ser", "vou sim", "estarei lá" ou qualquer resposta afirmativa), USE "confirmar_consulta" para atualizar o status.
+- NÃO peça confirmação formal com número. Interprete a intenção naturalmente.
+- Após confirmar, agradeça e diga que esperamos o paciente no dia.
+
 HANDOFF PARA HUMANO:
 Se o paciente pedir para falar com um humano/atendente, ou se você não souber resolver o problema, USE "solicitar_atendente".`;
 
@@ -233,6 +238,18 @@ Se o paciente pedir para falar com um humano/atendente, ou se você não souber 
               motivo: { type: "string", description: "Motivo da transferência" }
             },
             required: ["motivo"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "confirmar_consulta",
+          description: "Confirma a presença do paciente em uma consulta agendada. Use quando o paciente responder afirmativamente a um lembrete de consulta (ex: sim, ok, confirmado, pode ser, vou sim).",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: []
           }
         }
       }
@@ -448,6 +465,41 @@ Se o paciente pedir para falar com um humano/atendente, ou se você não souber 
           } catch (e: any) {
             console.error("Tool solicitar_atendente failed:", e);
             toolResponseText = `Falha ao transferir: ${e.message}`;
+          }
+
+        } else if (toolCall.function.name === 'confirmar_consulta') {
+          try {
+            // Buscar próximo agendamento do paciente
+            const { data: proximoAg } = await supabaseAdmin
+              .from('agendamentos')
+              .select('id, data_hora, observacao')
+              .eq('clinic_id', conversa.clinic_id)
+              .eq('paciente_telefone', recipientPhone)
+              .eq('status', 'marcado')
+              .gte('data_hora', new Date().toISOString())
+              .order('data_hora', { ascending: true })
+              .limit(1)
+              .maybeSingle();
+
+            if (!proximoAg) {
+              toolResponseText = 'Não encontrei nenhuma consulta pendente de confirmação para este paciente.';
+            } else {
+              await supabaseAdmin
+                .from('agendamentos')
+                .update({ status: 'confirmado' })
+                .eq('id', proximoAg.id);
+
+              const dtFormatada = new Date(proximoAg.data_hora).toLocaleDateString('pt-BR', {
+                day: '2-digit', month: '2-digit', year: 'numeric',
+                hour: '2-digit', minute: '2-digit',
+                timeZone: 'America/Sao_Paulo'
+              });
+              toolResponseText = `Consulta confirmada com sucesso! Data: ${dtFormatada}. Procedimento: ${proximoAg.observacao || 'Consulta'}.`;
+              console.log('Consulta confirmada via Tool!', proximoAg.id);
+            }
+          } catch (e: any) {
+            console.error('Tool confirmar_consulta failed:', e);
+            toolResponseText = `Falha ao confirmar consulta: ${e.message}`;
           }
         }
 

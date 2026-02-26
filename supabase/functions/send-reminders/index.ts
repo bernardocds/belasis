@@ -67,10 +67,21 @@ serve(async (req) => {
                     timeZone: 'America/Sao_Paulo'
                 });
 
-                const message = `🔔 Lembrete: Você tem uma consulta agendada!\n\n` +
-                    `📅 Data: ${dataFormatada}\n` +
-                    `📋 Procedimento: ${ag.observacao || 'Consulta'}\n\n` +
-                    `Se precisar remarcar ou cancelar, basta me enviar uma mensagem!`;
+                // Buscar nome da clínica
+                const { data: clinicaData } = await supabaseAdmin
+                    .from('clinicas')
+                    .select('nome')
+                    .eq('id', ag.clinic_id)
+                    .single();
+
+                const nomeClinica = clinicaData?.nome || 'nossa clínica';
+
+                const message = `Olá, ${ag.paciente_nome?.split(' ')[0] || 'paciente'}! 😊\n\n` +
+                    `Passando para confirmar sua consulta:\n\n` +
+                    `📅 *${dataFormatada}*\n` +
+                    `📋 ${ag.observacao || 'Consulta'}\n` +
+                    `🏥 ${nomeClinica}\n\n` +
+                    `Pode confirmar sua presença? Basta responder esta mensagem! 💬`;
 
                 const sendRes = await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
                     method: 'POST',
