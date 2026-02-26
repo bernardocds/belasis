@@ -11,7 +11,7 @@ Este workflow faz o deploy de Edge Functions contornando o sandbox do macOS que 
 ## Pré-requisitos
 - Node.js instalado
 - Biblioteca `pg` instalada em `db_setup/`
-- Access Token do Supabase: usar `sbp_88bfad6cb7d68efc68807dbad2c4d6ac62f2e580`
+- Access Token do Supabase: usar `sbp_f80fc5a670dae2d639541fe640c722444817656e`
 
 ## Passos
 
@@ -26,7 +26,7 @@ const path = require('path');
 const slug = process.argv[1];
 const code = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'functions', slug, 'index.ts'), 'utf8');
 const body = JSON.stringify({ body: code, slug: slug, name: slug, verify_jwt: false, entrypoint_path: 'index.ts', import_map: false });
-const req = https.request({ hostname: 'api.supabase.com', port: 443, path: '/v1/projects/fvxxlrzaqqewihuabcxu/functions/' + slug, method: 'PATCH', headers: { 'Authorization': 'Bearer sbp_88bfad6cb7d68efc68807dbad2c4d6ac62f2e580', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }}, (res) => { let d=''; res.on('data', c => d+=c); res.on('end', () => console.log(res.statusCode === 200 ? '✅ Deploy OK! ' + slug : '❌ Erro: ' + d)); });
+const req = https.request({ hostname: 'api.supabase.com', port: 443, path: '/v1/projects/fvxxlrzaqqewihuabcxu/functions/' + slug, method: 'PATCH', headers: { 'Authorization': 'Bearer sbp_f80fc5a670dae2d639541fe640c722444817656e', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }}, (res) => { let d=''; res.on('data', c => d+=c); res.on('end', () => console.log(res.statusCode === 200 ? '✅ Deploy OK! ' + slug : '❌ Erro: ' + d)); });
 req.write(body); req.end();
 " <NOME>
 ```
