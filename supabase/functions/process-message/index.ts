@@ -135,10 +135,22 @@ CONSULTA E CANCELAMENTO:
 - Para cancelar: PRIMEIRO consulte, mostre a lista (SEM o código ref), peça confirmação, depois use "cancelar_agendamento"
 - Para reagendar: PRIMEIRO consulte, identifique qual, peça a nova data/hora, depois use "reagendar_consulta"
 
-CONFIRMAÇÃO DE CONSULTA:
-- Quando o paciente responder confirmando presença (ex: "sim", "ok", "confirmado", "pode ser", "vou sim", "estarei lá" ou qualquer resposta afirmativa), USE "confirmar_consulta" para atualizar o status.
-- NÃO peça confirmação formal com número. Interprete a intenção naturalmente.
-- Após confirmar, agradeça e diga que esperamos o paciente no dia.
+CONFIRMAÇÃO DE CONSULTA (FLUXO PRINCIPAL APÓS LEMBRETE):
+- Quando o paciente responder confirmando presença, USE "confirmar_consulta". Exemplos de confirmação: "sim", "ok", "confirmado", "pode ser", "vou sim", "estarei lá", "com certeza", "beleza", "pode crer", "tá marcado", "vou", "confirmo", "certo", "é pra já", "combinado", "show", "bora", "tamo junto", "fechado", thumbs up emoji, ou qualquer variação afirmativa.
+- Interprete a INTENÇÃO naturalmente, sem pedir número ou confirmação formal.
+- Após confirmar, agradeça e diga que esperamos o paciente no dia com carinho.
+
+- Se o paciente quiser CANCELAR a consulta durante a confirmação:
+  → NÃO cancele sozinho. USE "solicitar_atendente" com motivo "Paciente solicitou cancelamento durante confirmação de consulta".
+  → Diga algo como: "Entendo! Vou transferir para nossa equipe para te ajudar com isso."
+  → A atendente humana vai lidar com a retenção.
+
+- Se o paciente quiser REMARCAR a consulta:
+  → USE "buscar_horarios_disponiveis" para encontrar os próximos horários livres.
+  → Apresente as 3-4 datas/horários mais PRÓXIMOS disponíveis.
+  → Mostre urgência amigável: "Tenho esses horários pertinho, qual fica melhor pra você?"
+  → Quando o paciente escolher, USE "reagendar_consulta" com a nova data.
+  → OBJETIVO: manter o paciente agendado. Não deixe sair sem nova data.
 
 HANDOFF PARA HUMANO:
 Se o paciente pedir para falar com um humano/atendente, ou se você não souber resolver o problema, USE "solicitar_atendente".`;
@@ -245,10 +257,24 @@ Se o paciente pedir para falar com um humano/atendente, ou se você não souber 
         type: "function",
         function: {
           name: "confirmar_consulta",
-          description: "Confirma a presença do paciente em uma consulta agendada. Use quando o paciente responder afirmativamente a um lembrete de consulta (ex: sim, ok, confirmado, pode ser, vou sim).",
+          description: "Confirma a presença do paciente em uma consulta agendada. Use quando o paciente responder afirmativamente a um lembrete de consulta (ex: sim, ok, confirmado, pode ser, vou sim, beleza, show, bora, combinado, etc).",
           parameters: {
             type: "object",
             properties: {},
+            required: []
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "buscar_horarios_disponiveis",
+          description: "Busca os próximos horários disponíveis na agenda da clínica para reagendamento. Use quando o paciente quiser remarcar uma consulta, para sugerir as datas mais próximas.",
+          parameters: {
+            type: "object",
+            properties: {
+              dias_a_frente: { type: "number", description: "Quantos dias à frente buscar (padrão 5)", default: 5 }
+            },
             required: []
           }
         }
@@ -500,6 +526,84 @@ Se o paciente pedir para falar com um humano/atendente, ou se você não souber 
           } catch (e: any) {
             console.error('Tool confirmar_consulta failed:', e);
             toolResponseText = `Falha ao confirmar consulta: ${e.message}`;
+          }
+
+        } else if (toolCall.function.name === 'buscar_horarios_disponiveis') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments || '{}');
+            const diasAFrente = args.dias_a_frente || 5;
+
+            // Buscar agendamentos existentes nos próximos X dias
+            const agora = new Date();
+            const limite = new Date(agora.getTime() + diasAFrente * 24 * 60 * 60 * 1000);
+
+            const { data: agExistentes } = await supabaseAdmin
+              .from('agendamentos')
+              .select('data_hora, duracao_min')
+              .eq('clinic_id', conversa.clinic_id)
+              .in('status', ['marcado', 'confirmado'])
+              .gte('data_hora', agora.toISOString())
+              .lte('data_hora', limite.toISOString());
+
+            const ocupados = new Set((agExistentes || []).map((a: any) => {
+              const d = new Date(a.data_hora);
+              return d.toISOString().substring(0, 16); // YYYY-MM-DDTHH:mm
+            }));
+
+            // Gerar slots disponíveis baseado nos horários da clínica
+            const diasSemana = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+            const slotsDisponiveis: string[] = [];
+
+            for (let d = 0; d < diasAFrente && slotsDisponiveis.length < 10; d++) {
+              const dia = new Date(agora.getTime() + (d + 1) * 24 * 60 * 60 * 1000);
+              const diaSemana = diasSemana[dia.getDay()];
+              const configDia = configAgenda?.horarios_trabalho?.[diaSemana];
+
+              if (!configDia) continue; // dia sem expediente
+
+              const [hInicio, mInicio] = configDia.inicio.split(':').map(Number);
+              const [hFim, mFim] = configDia.fim.split(':').map(Number);
+
+              // Gerar slots de 30 min
+              for (let h = hInicio; h < hFim; h++) {
+                for (let m = (h === hInicio ? mInicio : 0); m < 60; m += 30) {
+                  if (h === hFim - 1 && m >= mFim) break;
+
+                  const horaStr = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+
+                  // Pular intervalos (almoço)
+                  if (configAgenda?.intervalos?.some((int: any) => horaStr >= int.inicio && horaStr < int.fim)) {
+                    continue;
+                  }
+
+                  const slotDate = new Date(dia);
+                  slotDate.setHours(h, m, 0, 0);
+                  const slotKey = slotDate.toISOString().substring(0, 16);
+
+                  if (!ocupados.has(slotKey)) {
+                    const dtFormatada = slotDate.toLocaleDateString('pt-BR', {
+                      weekday: 'long', day: '2-digit', month: '2-digit',
+                      hour: '2-digit', minute: '2-digit',
+                      timeZone: 'America/Sao_Paulo'
+                    });
+                    slotsDisponiveis.push(`${dtFormatada} (ISO: ${slotDate.toISOString()})`);
+                  }
+
+                  if (slotsDisponiveis.length >= 10) break;
+                }
+                if (slotsDisponiveis.length >= 10) break;
+              }
+            }
+
+            if (slotsDisponiveis.length === 0) {
+              toolResponseText = 'Não encontrei horários disponíveis nos próximos dias. Sugira ao paciente entrar em contato com a clínica para verificar disponibilidade em datas mais distantes.';
+            } else {
+              toolResponseText = `Horários disponíveis mais próximos:\n${slotsDisponiveis.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nApresente as 3-4 opções mais próximas ao paciente de forma amigável, SEM mostrar o formato ISO. Quando o paciente escolher, use reagendar_consulta com o ISO correspondente.`;
+            }
+            console.log('Busca de horários realizada:', slotsDisponiveis.length, 'slots encontrados');
+          } catch (e: any) {
+            console.error('Tool buscar_horarios_disponiveis failed:', e);
+            toolResponseText = `Falha ao buscar horários: ${e.message}`;
           }
         }
 
