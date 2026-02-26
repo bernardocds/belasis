@@ -95,24 +95,40 @@ serve(async (req) => {
       });
     }
 
-    // ── 2. Fetch the clinic's custom AI prompt ───────────────────────────────
+    // ── 2. Fetch the clinic's custom AI prompt & Agenda Config ───────────────
     const { data: clinica } = await supabaseAdmin
       .from('clinicas')
       .select('prompt, nome')
       .eq('id', conversa.clinic_id)
       .single();
 
+    const { data: configAgenda } = await supabaseAdmin
+      .from('configuracoes_clinica')
+      .select('*')
+      .eq('clinic_id', conversa.clinic_id)
+      .single();
+
     // Adiciona instruções sistêmicas para a IA saber agendar
+    const hoursStr = configAgenda?.horarios_trabalho ?
+      Object.entries(configAgenda.horarios_trabalho)
+        .map(([dia, h]: [string, any]) => `${dia}: ${h.inicio}-${h.fim}`)
+        .join(', ') : 'Segunda a Sexta: 08:00-18:00';
+
+    const conveniosStr = configAgenda?.convenios_aceitos?.join(', ') || 'Particular';
+
     const systemPromptBase = clinica?.prompt ||
       `Você é um assistente virtual atencioso e prestativo da clínica "${clinica?.nome ?? 'médica'}". ` +
       `Responda de forma clara, humanizada e profissional. ` +
       `Ajude com agendamentos, informações e dúvidas gerais.`;
 
     const systemPrompt = systemPromptBase +
+      `\n\nHORÁRIOS DA CLÍNICA: ${hoursStr}` +
+      `\nCONVÊNIOS ACEITOS: ${conveniosStr}` +
       `\n\nINSTRUÇÕES DE AGENDAMENTO:
-Quando o paciente quiser marcar uma consulta, você DEVE coletar: 1) Nome completo, 2) Data e hora, 3) Procedimento/motivo.
+Quando o paciente quiser marcar uma consulta, você DEVE coletar: 1) Nome completo, 2) Convênio (se aceitarmos), 3) Data e hora, 4) Procedimento/motivo.
 O telefone já possuímos. Com tudo confirmado, EXECUTE "agendar_consulta".
-Nunca invente horários. Formato ISO 8601 (ex: 2024-03-10T14:30:00-03:00). Data atual: ${new Date().toISOString()}.
+Se o paciente solicitar um horário fora do expediente ou já ocupado, a ferramenta retornará um erro. Nesse caso, sugira o próximo horário disponível.
+Data atual: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}. Formato ISO 8601 exigido pela ferramenta.
 
 CONSULTA E CANCELAMENTO:
 - Para ver consultas: USE "consultar_agendamentos"
@@ -120,8 +136,7 @@ CONSULTA E CANCELAMENTO:
 - Para reagendar: PRIMEIRO consulte, identifique qual, peça a nova data/hora, depois use "reagendar_consulta"
 
 HANDOFF PARA HUMANO:
-Se o paciente pedir para falar com um humano/atendente, ou se você não souber resolver o problema, USE "solicitar_atendente".
-Após transferir, diga que um atendente vai entrar em contato em breve.`;
+Se o paciente pedir para falar com um humano/atendente, ou se você não souber resolver o problema, USE "solicitar_atendente".`;
 
     // ── 3. Fetch conversation history (last 15 messages for context) ─────────
     const { data: history, error: historyError } = await supabaseAdmin
@@ -264,40 +279,76 @@ Após transferir, diga que um atendente vai entrar em contato em breve.`;
           const args: AgendarConsultaData = JSON.parse(toolCall.function.arguments);
 
           try {
-            let paciente_id = null;
+            // ── VALIDATION: Work Hours & Conflicts ──
+            const dataAgendamento = new Date(args.data_hora_iso);
+            const diaSemana = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'][dataAgendamento.getDay()];
+            const horaAgendamento = dataAgendamento.getHours().toString().padStart(2, '0') + ':' + dataAgendamento.getMinutes().toString().padStart(2, '0');
 
-            let { data: patientData } = await supabaseAdmin
-              .from('pacientes')
-              .select('id')
-              .eq('clinic_id', conversa.clinic_id)
-              .eq('telefone', recipientPhone)
-              .maybeSingle();
+            const configDia = configAgenda?.horarios_trabalho?.[diaSemana];
 
-            if (!patientData) {
-              const { data: newPatient, error: newPatientError } = await supabaseAdmin
-                .from('pacientes')
-                .insert({ clinic_id: conversa.clinic_id, nome: args.nome_paciente, telefone: recipientPhone })
-                .select('id')
-                .single();
-              if (newPatientError) throw new Error("Erro ao criar paciente: " + newPatientError.message);
-              paciente_id = newPatient.id;
-            } else {
-              paciente_id = patientData.id;
-              await supabaseAdmin.from('pacientes').update({ nome: args.nome_paciente }).eq('id', paciente_id);
+            // 1. Check if it's a workday and within hours
+            if (!configDia || horaAgendamento < configDia.inicio || horaAgendamento >= configDia.fim) {
+              const infoHours = configDia ? `atendemos das ${configDia.inicio} às ${configDia.fim}` : "não atendemos nesse dia";
+              toolResponseText = `ERRO: A clínica não atende neste horário (${diaSemana}, ${horaAgendamento}). Na ${diaSemana}, ${infoHours}. Peça ao paciente para escolher outro horário.`;
+              console.log("Validation failed: Outside work hours.");
             }
+            // 2. Check Lunch Break (Intervalos)
+            else if (configAgenda?.intervalos?.some((int: any) => horaAgendamento >= int.inicio && horaAgendamento < int.fim)) {
+              toolResponseText = `ERRO: O horário solicitado (${horaAgendamento}) cai no intervalo da clínica. Peça ao paciente para escolher outro horário.`;
+              console.log("Validation failed: Lunch break.");
+            }
+            // 3. Check for Conflicts
+            else {
+              const { data: conflito } = await supabaseAdmin
+                .from('agendamentos')
+                .select('id')
+                .eq('clinic_id', conversa.clinic_id)
+                .eq('data_hora', args.data_hora_iso)
+                .in('status', ['marcado', 'confirmado'])
+                .maybeSingle();
 
-            const { error: insertErr } = await supabaseAdmin
-              .from('agendamentos')
-              .insert({
-                clinic_id: conversa.clinic_id, conversa_id, paciente_id,
-                duracao_min: args.duracao_minutos || 30, observacao: args.procedimento_esperado,
-                data_hora: args.data_hora_iso, status: 'marcado',
-                paciente_nome: args.nome_paciente, paciente_telefone: recipientPhone
-              });
-            if (insertErr) throw new Error("Erro ao agendar: " + insertErr.message);
+              if (conflito) {
+                toolResponseText = `ERRO: Já existe uma consulta marcada para este horário (${args.data_hora_iso}). Sugira outro horário ao paciente.`;
+                console.log("Validation failed: Scheduling conflict.");
+              } else {
+                // All clear - proceed with booking
+                let paciente_id = null;
+                // rest of the original logic...
 
-            toolResponseText = `O agendamento foi realizado com sucesso no sistema para o dia ${args.data_hora_iso}.`;
-            console.log("Agendamento criado via Tool com sucesso!");
+                let { data: patientData } = await supabaseAdmin
+                  .from('pacientes')
+                  .select('id')
+                  .eq('clinic_id', conversa.clinic_id)
+                  .eq('telefone', recipientPhone)
+                  .maybeSingle();
+
+                if (!patientData) {
+                  const { data: newPatient, error: newPatientError } = await supabaseAdmin
+                    .from('pacientes')
+                    .insert({ clinic_id: conversa.clinic_id, nome: args.nome_paciente, telefone: recipientPhone })
+                    .select('id')
+                    .single();
+                  if (newPatientError) throw new Error("Erro ao criar paciente: " + newPatientError.message);
+                  paciente_id = newPatient.id;
+                } else {
+                  paciente_id = patientData.id;
+                  await supabaseAdmin.from('pacientes').update({ nome: args.nome_paciente }).eq('id', paciente_id);
+                }
+
+                const { error: insertErr } = await supabaseAdmin
+                  .from('agendamentos')
+                  .insert({
+                    clinic_id: conversa.clinic_id, conversa_id, paciente_id,
+                    duracao_min: args.duracao_minutos || 30, observacao: args.procedimento_esperado,
+                    data_hora: args.data_hora_iso, status: 'marcado',
+                    paciente_nome: args.nome_paciente, paciente_telefone: recipientPhone
+                  });
+                if (insertErr) throw new Error("Erro ao agendar: " + insertErr.message);
+
+                toolResponseText = `O agendamento foi realizado com sucesso no sistema para o dia ${args.data_hora_iso}.`;
+                console.log("Agendamento criado via Tool com sucesso!");
+              }
+            }
           } catch (e: any) {
             console.error("Tool agendar_consulta failed:", e);
             toolResponseText = "Falha ao gravar agendamento. Diga que ocorreu um erro interno e peça para tentar mais tarde.";
