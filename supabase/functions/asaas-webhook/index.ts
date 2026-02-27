@@ -6,16 +6,51 @@ const corsHeaders = {
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+function extractBearerToken(authorizationHeader: string | null): string | null {
+    if (!authorizationHeader) return null
+    const match = authorizationHeader.match(/^Bearer\s+(.+)$/i)
+    return match?.[1]?.trim() || null
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+    const enc = new TextEncoder()
+    const aBytes = enc.encode(a)
+    const bBytes = enc.encode(b)
+    if (aBytes.length !== bBytes.length) return false
+    let diff = 0
+    for (let i = 0; i < aBytes.length; i++) {
+        diff |= aBytes[i] ^ bBytes[i]
+    }
+    return diff === 0
+}
+
 serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders })
     }
 
     try {
+        const asaasWebhookToken = Deno.env.get('ASAAS_WEBHOOK_TOKEN')
+        if (asaasWebhookToken) {
+            const providedToken =
+                req.headers.get('asaas-access-token')
+                || req.headers.get('x-asaas-access-token')
+                || extractBearerToken(req.headers.get('authorization'))
+
+            if (!providedToken || !timingSafeEqual(providedToken, asaasWebhookToken)) {
+                return new Response(JSON.stringify({ error: 'Unauthorized webhook' }), {
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                    status: 401,
+                })
+            }
+        } else {
+            console.warn('ASAAS_WEBHOOK_TOKEN is not configured. Incoming Asaas webhooks are not authenticated.')
+        }
+
         const payload = await req.json()
         const event = payload.event // Asaas event type
 
-        console.log('Asaas webhook received:', event, JSON.stringify(payload).substring(0, 200))
+        console.log('Asaas webhook received:', event)
 
         const supabaseAdmin = createClient(
             Deno.env.get('SUPABASE_URL') ?? '',

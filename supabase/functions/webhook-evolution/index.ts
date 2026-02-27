@@ -9,6 +9,24 @@ const corsHeaders = {
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+function extractBearerToken(authorizationHeader: string | null): string | null {
+    if (!authorizationHeader) return null;
+    const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
+    return match?.[1]?.trim() || null;
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+    const enc = new TextEncoder();
+    const aBytes = enc.encode(a);
+    const bBytes = enc.encode(b);
+    if (aBytes.length !== bBytes.length) return false;
+    let diff = 0;
+    for (let i = 0; i < aBytes.length; i++) {
+        diff |= aBytes[i] ^ bBytes[i];
+    }
+    return diff === 0;
+}
+
 function maskPhone(phone: string): string {
     const digits = String(phone || '').replace(/\D/g, '');
     if (digits.length <= 4) return '****';
@@ -18,6 +36,23 @@ function maskPhone(phone: string): string {
 serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders })
+    }
+
+    const evolutionWebhookSecret = Deno.env.get('EVOLUTION_WEBHOOK_SECRET');
+    if (evolutionWebhookSecret) {
+        const providedSecret =
+            req.headers.get('x-webhook-secret')
+            || req.headers.get('x-evolution-secret')
+            || extractBearerToken(req.headers.get('authorization'));
+
+        if (!providedSecret || !timingSafeEqual(providedSecret, evolutionWebhookSecret)) {
+            return new Response(JSON.stringify({ error: 'Unauthorized webhook' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 401,
+            });
+        }
+    } else {
+        console.warn('EVOLUTION_WEBHOOK_SECRET is not configured. Incoming Evolution webhooks are not authenticated.');
     }
 
     let payload: any;
