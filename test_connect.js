@@ -1,5 +1,12 @@
-const supabaseUrl = "https://fvxxlrzaqqewihuabcxu.supabase.co";
-const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ2eHhscnphcXFld2lodWFiY3h1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEzOTM1NDIsImV4cCI6MjA4Njk2OTU0Mn0.B053eTqCXAPJHr1P5THeOczBgIiU_21IIpS-T_qbPLY";
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+const testEmail = process.env.TEST_EMAIL || "";
+const testPassword = process.env.TEST_PASSWORD || "";
+
+if (!supabaseUrl || !supabaseKey || !testEmail || !testPassword) {
+    console.error("Missing SUPABASE_URL, SUPABASE_ANON_KEY, TEST_EMAIL or TEST_PASSWORD.");
+    process.exit(1);
+}
 
 async function test() {
     console.log("Logging in...");
@@ -10,8 +17,8 @@ async function test() {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            email: "bellaassist-v3@mailinator.com",
-            password: "SecurePassword123!"
+            email: testEmail,
+            password: testPassword
         })
     });
 
