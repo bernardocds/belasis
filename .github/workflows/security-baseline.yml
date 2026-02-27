@@ -31,11 +31,14 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install root dependencies
-        run: npm install --no-audit
-
-      - name: Audit root dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit npm dependencies (if package.json exists)
+        run: |
+          if [ -f package.json ]; then
+            npm install --no-audit
+            npm audit --omit=dev --audit-level=high
+          else
+            echo "No package.json in repository root. Skipping npm audit."
+          fi
 
       - name: Setup Deno
         uses: denoland/setup-deno@v2
@@ -62,12 +65,13 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install root dependencies
-        run: npm install --no-audit
-
       - name: Skip DB checks when DATABASE_URL is missing
         if: ${{ env.DATABASE_URL == '' }}
         run: echo "DATABASE_URL secret not configured. Skipping db-security job."
+
+      - name: Install pg runtime dependency
+        if: ${{ env.DATABASE_URL != '' }}
+        run: npm install --no-save pg
 
       - name: Run RLS audit
         if: ${{ env.DATABASE_URL != '' }}
