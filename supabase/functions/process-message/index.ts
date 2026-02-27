@@ -98,6 +98,44 @@ function normalizeWeekdayInput(input: unknown): string | null {
   return WEEKDAY_INPUT_ALIASES[key] || null;
 }
 
+function extractWeekdayFromText(input: string): string | null {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return null;
+
+  for (const [alias, weekday] of Object.entries(WEEKDAY_INPUT_ALIASES)) {
+    if (normalized.includes(alias)) return weekday;
+  }
+
+  return null;
+}
+
+function extractDateIsoFromText(input: string, referenceYear: number): string | null {
+  const directIso = input.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (directIso) {
+    const candidate = `${directIso[1]}-${directIso[2]}-${directIso[3]}`;
+    return normalizeDateKeyInput(candidate);
+  }
+
+  const brDate = input.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/);
+  if (!brDate) return null;
+
+  const day = Number(brDate[1]);
+  const month = Number(brDate[2]);
+  let year = referenceYear;
+
+  if (brDate[3]) {
+    const rawYear = Number(brDate[3]);
+    if (String(rawYear).length === 2) {
+      year = rawYear + 2000;
+    } else {
+      year = rawYear;
+    }
+  }
+
+  const candidate = `${year}-${pad2(month)}-${pad2(day)}`;
+  return normalizeDateKeyInput(candidate);
+}
+
 function getWeekdayLabel(weekdayKey: string): string {
   return WEEKDAY_LABELS[weekdayKey] || weekdayKey;
 }
@@ -425,8 +463,41 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
 
     if (historyError) throw new Error('History fetch error: ' + historyError.message);
 
+    const recentUserTexts = (history ?? [])
+      .filter((m: any) => m.role === 'user' && typeof m.conteudo === 'string')
+      .slice(-6)
+      .map((m: any) => m.conteudo);
+    const availabilityContextText = recentUserTexts.join(' ');
+    const availabilityContextNorm = normalizeTextKey(availabilityContextText);
+
+    const looksLikeAvailabilityIntent =
+      availabilityContextNorm.includes('horariodisponivel') ||
+      availabilityContextNorm.includes('horariosdisponiveis') ||
+      availabilityContextNorm.includes('quaishorarios') ||
+      availabilityContextNorm.includes('temhorario') ||
+      availabilityContextNorm.includes('temvaga') ||
+      availabilityContextNorm.includes('vagas') ||
+      availabilityContextNorm.includes('disponivel');
+
+    const isOnlyOperatingHoursIntent =
+      availabilityContextNorm.includes('funcionamento') &&
+      !availabilityContextNorm.includes('disponivel') &&
+      !availabilityContextNorm.includes('vaga');
+
+    const shouldForceAvailabilityLookup = looksLikeAvailabilityIntent && !isOnlyOperatingHoursIntent;
+    const forcedLookupWeekday = extractWeekdayFromText(availabilityContextText);
+    const forcedLookupDateIso = extractDateIsoFromText(availabilityContextText, nowSP.year);
+
+    const forcedLookupHint = shouldForceAvailabilityLookup
+      ? `ATENÇÃO TÉCNICA: o paciente está pedindo disponibilidade de agenda. Você DEVE chamar a tool "buscar_horarios_disponiveis" antes de responder sobre vagas. ` +
+        `${forcedLookupWeekday ? `Use dia_semana="${forcedLookupWeekday}". ` : ''}` +
+        `${forcedLookupDateIso ? `Use data_iso="${forcedLookupDateIso}". ` : ''}` +
+        `Não responda "sem vagas" sem consultar a tool.`
+      : '';
+
     const messagesForAI: any[] = [
       { role: 'system', content: systemPrompt },
+      ...(forcedLookupHint ? [{ role: 'system', content: forcedLookupHint }] : []),
       ...(history ?? []).map((m: any) => ({
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.conteudo,
@@ -541,7 +612,9 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         messages: messagesForAI,
         temperature: 0.7,
         tools: tools,
-        tool_choice: "auto",
+        tool_choice: shouldForceAvailabilityLookup
+          ? { type: "function", function: { name: "buscar_horarios_disponiveis" } }
+          : "auto",
         max_tokens: 500,
       }),
     });
@@ -829,8 +902,8 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         } else if (toolCall.function.name === 'buscar_horarios_disponiveis') {
           try {
             const args = JSON.parse(toolCall.function.arguments || '{}');
-            const diaSemanaSolicitado = normalizeWeekdayInput(args.dia_semana);
-            const dataSolicitadaKey = normalizeDateKeyInput(args.data_iso);
+            const diaSemanaSolicitado = normalizeWeekdayInput(args.dia_semana) || forcedLookupWeekday;
+            const dataSolicitadaKey = normalizeDateKeyInput(args.data_iso) || forcedLookupDateIso;
             const diasAFrenteRaw = Number(args.dias_a_frente);
             let diasAFrente = Number.isFinite(diasAFrenteRaw) && diasAFrenteRaw > 0
               ? Math.min(Math.floor(diasAFrenteRaw), 14)
