@@ -48,8 +48,58 @@ const WEEKDAY_TO_CONFIG_KEY: Record<string, string> = {
   'domingo': 'domingo',
 };
 
+const WEEKDAY_LABELS: Record<string, string> = {
+  segunda: 'segunda-feira',
+  terca: 'terça-feira',
+  quarta: 'quarta-feira',
+  quinta: 'quinta-feira',
+  sexta: 'sexta-feira',
+  sabado: 'sábado',
+  domingo: 'domingo',
+};
+
+const WEEKDAY_INPUT_ALIASES: Record<string, string> = {
+  seg: 'segunda',
+  segunda: 'segunda',
+  segundafeira: 'segunda',
+  ter: 'terca',
+  terca: 'terca',
+  tercafeira: 'terca',
+  qua: 'quarta',
+  quarta: 'quarta',
+  quartafeira: 'quarta',
+  qui: 'quinta',
+  quinta: 'quinta',
+  quintafeira: 'quinta',
+  sex: 'sexta',
+  sexta: 'sexta',
+  sextafeira: 'sexta',
+  sab: 'sabado',
+  sabado: 'sabado',
+  dom: 'domingo',
+  domingo: 'domingo',
+};
+
 function pad2(value: number): string {
   return String(value).padStart(2, '0');
+}
+
+function normalizeTextKey(input: unknown): string {
+  return String(input ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function normalizeWeekdayInput(input: unknown): string | null {
+  const key = normalizeTextKey(input);
+  if (!key) return null;
+  return WEEKDAY_INPUT_ALIASES[key] || null;
+}
+
+function getWeekdayLabel(weekdayKey: string): string {
+  return WEEKDAY_LABELS[weekdayKey] || weekdayKey;
 }
 
 function toMinutes(hhmm: string): number {
@@ -66,6 +116,16 @@ function parseIsoInputToDate(isoInput: string): Date {
   const normalized = (isoInput ?? '').trim().replace(' ', 'T');
   const hasOffset = /(?:[zZ]|[+-]\d{2}:\d{2})$/.test(normalized);
   return new Date(hasOffset ? normalized : `${normalized}-03:00`);
+}
+
+function normalizeDateKeyInput(input: unknown): string | null {
+  if (input === undefined || input === null) return null;
+  const raw = String(input).trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const dt = parseIsoInputToDate(raw);
+  if (Number.isNaN(dt.getTime())) return null;
+  return getSaoPauloParts(dt).dateKey;
 }
 
 function getSaoPauloParts(date: Date): SaoPauloDateParts {
@@ -322,6 +382,9 @@ serve(async (req) => {
 - REGRAS DE CONVÊNIO: NENHUM procedimento estético (Botox, Limpeza de Pele, Preenchimento, Depilação, etc) tem cobertura de convênio. Portanto, SE o paciente pedir um desses, NUNCA pergunte se ele tem convênio! Assuma que é particular.
 - DADOS OBRIGATÓRIOS PARA AGENDAR: 1) Nome (se não tiver no cadastro, peça apenas o nome), 2) Convênio (apenas para consultas dermatológicas), 3) Data/Hora desejada, 4) Procedimento.
 - PROATIVIDADE COM AGENDA: Se o paciente já disse o que quer e a data, use IMEDIATAMENTE "buscar_horarios_disponiveis" e mostre 3 opções de horário livres de forma animada e direta.
+- Se o paciente pedir DIA específico (ex.: segunda, terça) ou DATA específica, ao usar "buscar_horarios_disponiveis" PREENCHA obrigatoriamente o parâmetro "dia_semana" ou "data_iso".
+- NUNCA afirme que um dia está fechado/sem atendimento sem checar os HORÁRIOS DA CLÍNICA e sem consultar "buscar_horarios_disponiveis" com filtro do dia/data pedido.
+- Se não houver vaga em um dia que a clínica funciona, diga "sem vagas nesse dia" (agenda lotada), e NÃO "não atendemos nesse dia".
 - ESTADO ATUAL DA CLÍNICA: ${isClosedNow ? 'FECHADA' : 'ABERTA'}.
 - REGRAS SE ESTADO FOR FECHADA AGORA:
   1. No final do atendimento, informe que deixou pré-reservado e que a atendente chamará para confirmar o PIX quando abrirem.
@@ -455,7 +518,9 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
           parameters: {
             type: "object",
             properties: {
-              dias_a_frente: { type: "number", description: "Quantos dias à frente buscar (padrão 5)", default: 5 }
+              dias_a_frente: { type: "number", description: "Quantos dias à frente buscar (padrão 5)", default: 5 },
+              dia_semana: { type: "string", description: "Dia da semana solicitado pelo paciente (ex.: segunda, terça, quarta...)." },
+              data_iso: { type: "string", description: "Data específica solicitada pelo paciente em YYYY-MM-DD ou ISO 8601." }
             },
             required: []
           }
@@ -764,11 +829,20 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         } else if (toolCall.function.name === 'buscar_horarios_disponiveis') {
           try {
             const args = JSON.parse(toolCall.function.arguments || '{}');
+            const diaSemanaSolicitado = normalizeWeekdayInput(args.dia_semana);
+            const dataSolicitadaKey = normalizeDateKeyInput(args.data_iso);
             const diasAFrenteRaw = Number(args.dias_a_frente);
-            const diasAFrente = Number.isFinite(diasAFrenteRaw) && diasAFrenteRaw > 0
+            let diasAFrente = Number.isFinite(diasAFrenteRaw) && diasAFrenteRaw > 0
               ? Math.min(Math.floor(diasAFrenteRaw), 14)
               : 5;
             const duracaoPadraoMin = 30;
+
+            // Para filtro de dia/data específica, expandir janela para encontrar a próxima ocorrência com segurança.
+            if (dataSolicitadaKey) {
+              diasAFrente = Math.max(diasAFrente, 31);
+            } else if (diaSemanaSolicitado) {
+              diasAFrente = Math.max(diasAFrente, 21);
+            }
 
             // Buscar agendamentos existentes nos próximos X dias
             const agora = new Date();
@@ -798,12 +872,27 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
             // Gerar slots disponíveis baseado nos horários da clínica
             const slotsDisponiveis: string[] = [];
             const diasProcessados = new Set<string>();
+            let primeiraDataDoDiaSolicitado: string | null = null;
 
             for (let deslocamento = 0; diasProcessados.size < diasAFrente && slotsDisponiveis.length < 10; deslocamento++) {
               const diaRef = new Date(agora.getTime() + deslocamento * 24 * 60 * 60 * 1000);
               const diaSP = getSaoPauloParts(diaRef);
               if (diasProcessados.has(diaSP.dateKey)) continue;
               diasProcessados.add(diaSP.dateKey);
+
+              if (dataSolicitadaKey && diaSP.dateKey !== dataSolicitadaKey) {
+                continue;
+              }
+              if (diaSemanaSolicitado && diaSP.weekdayKey !== diaSemanaSolicitado) {
+                continue;
+              }
+              if (diaSemanaSolicitado && !dataSolicitadaKey) {
+                if (!primeiraDataDoDiaSolicitado) {
+                  primeiraDataDoDiaSolicitado = diaSP.dateKey;
+                } else if (diaSP.dateKey !== primeiraDataDoDiaSolicitado) {
+                  continue;
+                }
+              }
 
               const configDia = configAgenda?.horarios_trabalho?.[diaSP.weekdayKey];
               if (!configDia || !configDia.inicio || !configDia.fim) continue; // dia sem expediente
@@ -859,10 +948,21 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
               if (slotsDisponiveis.length >= 10) break;
             }
 
+            const filtroTexto = dataSolicitadaKey
+              ? `na data ${dataSolicitadaKey}`
+              : diaSemanaSolicitado
+                ? `na ${getWeekdayLabel(diaSemanaSolicitado)}`
+                : null;
+
             if (slotsDisponiveis.length === 0) {
-              toolResponseText = 'Não encontrei horários disponíveis nos próximos dias. Sugira ao paciente entrar em contato com a clínica para verificar disponibilidade em datas mais distantes.';
+              if (filtroTexto) {
+                toolResponseText = `Não encontrei horários disponíveis ${filtroTexto} dentro da janela consultada. IMPORTANTE: se esse dia é de atendimento da clínica, diga que está sem vagas nesse dia (agenda lotada), e ofereça buscar outro dia. NÃO diga que a clínica não funciona nesse dia sem checar os horários da clínica.`;
+              } else {
+                toolResponseText = 'Não encontrei horários disponíveis nos próximos dias. Sugira ao paciente entrar em contato com a clínica para verificar disponibilidade em datas mais distantes.';
+              }
             } else {
-              toolResponseText = `Horários disponíveis mais próximos: \n${slotsDisponiveis.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nApresente as 3 - 4 opções mais próximas ao paciente de forma amigável, SEM mostrar o formato ISO.Quando o paciente escolher, use reagendar_consulta com o ISO correspondente.`;
+              const titulo = filtroTexto ? `Horários disponíveis ${filtroTexto}:` : 'Horários disponíveis mais próximos:';
+              toolResponseText = `${titulo}\n${slotsDisponiveis.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nApresente as 3 - 4 opções mais próximas ao paciente de forma amigável, SEM mostrar o formato ISO.Quando o paciente escolher, use reagendar_consulta com o ISO correspondente.`;
             }
             console.log('Busca de horários realizada:', slotsDisponiveis.length, 'slots encontrados');
           } catch (e: any) {
