@@ -182,6 +182,37 @@ function textLooksLikeNextWeekRequest(input: string): boolean {
   );
 }
 
+function textLooksLikeCancelIntent(input: string): boolean {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return false;
+  return (
+    normalized.includes('cancelar') ||
+    normalized.includes('cancela') ||
+    normalized.includes('cancelamento') ||
+    normalized.includes('cancelei') ||
+    normalized.includes('cancelado') ||
+    normalized.includes('canceladas') ||
+    normalized.includes('cancelartudo')
+  );
+}
+
+function textLooksLikeAppointmentStatusIntent(input: string): boolean {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return false;
+  return (
+    normalized.includes('tenhoconsulta') ||
+    normalized.includes('eutenhoconsulta') ||
+    normalized.includes('consultamarcada') ||
+    normalized.includes('consultasmarcadas') ||
+    normalized.includes('tenhoalgumaconsulta') ||
+    normalized.includes('jaestoumarcado') ||
+    normalized.includes('toagendado') ||
+    normalized.includes('toagendada') ||
+    normalized.includes('jaestouagendado') ||
+    normalized.includes('jaestouagendada')
+  );
+}
+
 function extractDateIsoFromText(input: string, referenceYear: number): string | null {
   const directIso = input.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
   if (directIso) {
@@ -415,22 +446,41 @@ serve(async (req) => {
 
     // ── 2.1 Fetch patient's active appointments to provide immediate context ─
     const recipientPhoneContext = conversa.paciente_telefone.replace('@s.whatsapp.net', '').replace('@c.us', '');
+    const nowIso = new Date().toISOString();
     const { data: agendamentosAtivos } = await supabaseAdmin
       .from('agendamentos')
       .select('id, data_hora, status, observacao')
       .eq('clinic_id', conversa.clinic_id)
       .eq('paciente_telefone', recipientPhoneContext)
       .in('status', ['marcado', 'confirmado'])
+      .gte('data_hora', nowIso)
       .order('data_hora', { ascending: true });
 
-    let agendamentosContextText = "O paciente NÃO possui consultas ativas agendadas no momento.";
+    const { data: canceladosRecentes } = await supabaseAdmin
+      .from('agendamentos')
+      .select('id, data_hora, status, observacao')
+      .eq('clinic_id', conversa.clinic_id)
+      .eq('paciente_telefone', recipientPhoneContext)
+      .eq('status', 'cancelado')
+      .gte('data_hora', new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString())
+      .order('data_hora', { ascending: false })
+      .limit(5);
+
+    let agendamentosContextText = "O paciente NÃO possui consultas ativas FUTURAS agendadas no momento.";
     if (agendamentosAtivos && agendamentosAtivos.length > 0) {
       const listAgs = agendamentosAtivos.map((a: any, i: number) => {
         const dt = new Date(a.data_hora);
         const dataFormatada = formatDateTimeSP(dt);
         return `${i + 1}. Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} [ref:${a.id}] | Status: ${a.status}`;
       }).join('\n');
-      agendamentosContextText = `CONSULTAS AGENDADAS ATIVAS DO PACIENTE:\n${listAgs}\n* IMPORTANTE: Não revele o código [ref:...], use-o apenas se for cancelar/reagendar.`;
+      agendamentosContextText = `CONSULTAS AGENDADAS ATIVAS FUTURAS DO PACIENTE:\n${listAgs}\n* IMPORTANTE: Não revele o código [ref:...], use-o apenas se for cancelar/reagendar.`;
+    } else if (canceladosRecentes && canceladosRecentes.length > 0) {
+      const listCancelados = canceladosRecentes.map((a: any, i: number) => {
+        const dt = new Date(a.data_hora);
+        const dataFormatada = formatDateTimeSP(dt);
+        return `${i + 1}. Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} | Status: cancelado`;
+      }).join('\n');
+      agendamentosContextText = `O paciente NÃO possui consultas ativas FUTURAS no momento.\nCANCELAMENTOS RECENTES:\n${listCancelados}`;
     }
 
     // ── 2.2 Fetch patient's registration to recognize them instantly ──────────
@@ -530,8 +580,11 @@ serve(async (req) => {
 - Formato ISO 8601 exigido pelas ferramentas.
 
 CONSULTA E CANCELAMENTO:
-- O paciente JÁ PODE TER consultas listadas no "CONTEXTO IMEDIATO". Se ele perguntar se tem consulta, apenas leia os dados do contexto (O que, Quando, Onde e Com Quem). Não invente nem chame ferramentas extras para consultar se os dados já estiverem ali.
+- O paciente JÁ PODE TER consultas listadas no "CONTEXTO IMEDIATO". Se ele perguntar se tem consulta, se já cancelou ou pedir cancelamento, SEMPRE confirme no sistema com "consultar_agendamentos" antes de responder.
+- NUNCA invente status de consulta (marcada, cancelada ou inexistente) sem checar no sistema.
+- IMPORTANTE: considere consultas ATIVAS apenas as FUTURAS (não trate consulta passada como ativa).
 - IMPORTANTE: NÃO existe ferramenta para cancelar agendamentos!
+- Se NÃO houver consulta ativa futura, informe isso claramente e NÃO faça o roteiro de retenção para cancelamento.
 - Se o paciente pedir para CANCELAR uma consulta, seja empático e humano. ** NÃO faça o handoff imediatamente ** e NÃO diga frases robóticas como "preciso verificar horários para possível remarcação".
 - PASSO 1 (Retenção humana): A forma correta de agir na primeira resposta é ser atencioso e sugerir a remarcação de forma natural, sem chamar nenhuma ferramenta ainda. Exemplo: "Poxa, que pena que não vai dar pra você ir na data marcada! 😔 Podemos tentar remarcar para uma data ou horário que fique melhor pra você, o que acha?".
 - PASSO 2 (Espera): ** ESPERE O PACIENTE RESPONDER **. Não ofereça encaminhar para o atendente ainda e não cite que está fazendo testes / procedimentos do sistema.
@@ -575,6 +628,14 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
       looksLikeAvailabilityIntentCurrent ||
       (hasPeriodFollowupCurrent && textLooksLikeAvailabilityIntent(previousUserText));
 
+    const looksLikeCancelIntentCurrent = textLooksLikeCancelIntent(latestUserText);
+    const looksLikeAppointmentStatusIntentCurrent = textLooksLikeAppointmentStatusIntent(latestUserText);
+    const looksLikeAppointmentFollowupCurrent =
+      (latestUserNorm.includes('essas') || latestUserNorm.includes('isso') || latestUserNorm.includes('asduas')) &&
+      (textLooksLikeCancelIntent(previousUserText) || textLooksLikeAppointmentStatusIntent(previousUserText));
+    const shouldForceAppointmentsLookup =
+      looksLikeCancelIntentCurrent || looksLikeAppointmentStatusIntentCurrent || looksLikeAppointmentFollowupCurrent;
+
     const isOnlyOperatingHoursIntent =
       latestUserNorm.includes('funcionamento') &&
       !looksLikeAvailabilityIntentCurrent;
@@ -601,7 +662,7 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         ? null
         : (currentDateIso || (looksLikeAvailabilityIntent ? previousDateIso : null));
 
-    const shouldForceAvailabilityLookup = looksLikeAvailabilityIntent && !isOnlyOperatingHoursIntent;
+    const shouldForceAvailabilityLookup = !shouldForceAppointmentsLookup && looksLikeAvailabilityIntent && !isOnlyOperatingHoursIntent;
 
     const forcedLookupHint = shouldForceAvailabilityLookup
       ? `ATENÇÃO TÉCNICA: o paciente está pedindo disponibilidade de agenda. Você DEVE chamar a tool "buscar_horarios_disponiveis" antes de responder sobre vagas. ` +
@@ -613,9 +674,14 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         `Não responda "sem vagas" sem consultar a tool.`
       : '';
 
+    const forcedAppointmentsHint = shouldForceAppointmentsLookup
+      ? `ATENÇÃO TÉCNICA: o paciente está perguntando status de consultas (marcada/cancelada) ou pedindo cancelamento. Você DEVE chamar a tool "consultar_agendamentos" antes de responder. Não invente status de consulta.`
+      : '';
+
     const messagesForAI: any[] = [
       { role: 'system', content: systemPrompt },
       ...(forcedLookupHint ? [{ role: 'system', content: forcedLookupHint }] : []),
+      ...(forcedAppointmentsHint ? [{ role: 'system', content: forcedAppointmentsHint }] : []),
       ...(history ?? []).map((m: any) => ({
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.conteudo,
@@ -650,7 +716,7 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         type: "function",
         function: {
           name: "consultar_agendamentos",
-          description: "Busca os agendamentos existentes do paciente na clínica pelo número de telefone. Use quando o paciente perguntar quais consultas tem agendadas.",
+          description: "Busca no sistema as consultas do paciente, retornando consultas ativas FUTURAS e também cancelamentos recentes para conferência de status. Use quando o paciente perguntar se tem consulta, se já cancelou ou pedir cancelamento.",
           parameters: {
             type: "object",
             properties: {},
@@ -733,9 +799,11 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         messages: messagesForAI,
         temperature: 0.7,
         tools: tools,
-        tool_choice: shouldForceAvailabilityLookup
-          ? { type: "function", function: { name: "buscar_horarios_disponiveis" } }
-          : "auto",
+        tool_choice: shouldForceAppointmentsLookup
+          ? { type: "function", function: { name: "consultar_agendamentos" } }
+          : shouldForceAvailabilityLookup
+            ? { type: "function", function: { name: "buscar_horarios_disponiveis" } }
+            : "auto",
         max_tokens: 500,
       }),
     });
@@ -891,26 +959,54 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
 
         } else if (toolCall.function.name === 'consultar_agendamentos') {
           try {
-            const { data: agendamentos, error: agError } = await supabaseAdmin
+            const nowIsoTool = new Date().toISOString();
+
+            const { data: agendamentosAtivosFuturos, error: ativosError } = await supabaseAdmin
               .from('agendamentos')
               .select('id, data_hora, status, observacao, paciente_nome, duracao_min')
               .eq('clinic_id', conversa.clinic_id)
               .eq('paciente_telefone', recipientPhone)
               .in('status', ['marcado', 'confirmado'])
+              .gte('data_hora', nowIsoTool)
               .order('data_hora', { ascending: true });
 
-            if (agError) throw new Error("Erro ao buscar agendamentos: " + agError.message);
+            if (ativosError) throw new Error("Erro ao buscar agendamentos ativos: " + ativosError.message);
 
-            if (!agendamentos || agendamentos.length === 0) {
-              toolResponseText = "O paciente não possui nenhum agendamento ativo no momento.";
+            const { data: canceladosRecentes, error: canceladosError } = await supabaseAdmin
+              .from('agendamentos')
+              .select('id, data_hora, status, observacao')
+              .eq('clinic_id', conversa.clinic_id)
+              .eq('paciente_telefone', recipientPhone)
+              .eq('status', 'cancelado')
+              .gte('data_hora', new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString())
+              .order('data_hora', { ascending: false })
+              .limit(5);
+
+            if (canceladosError) throw new Error("Erro ao buscar cancelamentos: " + canceladosError.message);
+
+            const partes: string[] = [];
+
+            if (!agendamentosAtivosFuturos || agendamentosAtivosFuturos.length === 0) {
+              partes.push('Consultas ativas futuras: nenhuma.');
             } else {
-              const lista = agendamentos.map((a: any, i: number) => {
+              const listaAtivos = agendamentosAtivosFuturos.map((a: any, i: number) => {
                 const dt = new Date(a.data_hora);
                 const dataFormatada = formatDateTimeSP(dt);
                 return `${i + 1}.Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} [ref: ${a.id}]`;
               }).join('\n');
-              toolResponseText = `Agendamentos encontrados: \n${lista} \n\nIMPORTANTE: Ao apresentar ao paciente, mostre APENAS o número, data e procedimento.NÃO mostre o código[ref:...], ele é apenas para uso interno.`;
+              partes.push(`Consultas ativas futuras:\n${listaAtivos}`);
             }
+
+            if (canceladosRecentes && canceladosRecentes.length > 0) {
+              const listaCancelados = canceladosRecentes.map((a: any, i: number) => {
+                const dt = new Date(a.data_hora);
+                const dataFormatada = formatDateTimeSP(dt);
+                return `${i + 1}.Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} | Status: cancelado`;
+              }).join('\n');
+              partes.push(`Cancelamentos recentes:\n${listaCancelados}`);
+            }
+
+            toolResponseText = `Status de consultas no sistema:\n${partes.join('\n\n')}\n\nIMPORTANTE: Ao responder ao paciente, nunca invente status. Se não houver consulta ativa futura, diga explicitamente que não há nada ativo para cancelar.`;
             console.log("Consulta de agendamentos realizada!");
           } catch (e: any) {
             console.error("Tool consultar_agendamentos failed:", e);
