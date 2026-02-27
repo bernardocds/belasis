@@ -50,8 +50,9 @@ jobs:
           done
 
   db-security:
-    if: ${{ secrets.DATABASE_URL != '' }}
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,18 +65,20 @@ jobs:
       - name: Install root dependencies
         run: npm ci
 
+      - name: Skip DB checks when DATABASE_URL is missing
+        if: ${{ env.DATABASE_URL == '' }}
+        run: echo "DATABASE_URL secret not configured. Skipping db-security job."
+
       - name: Run RLS audit
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        if: ${{ env.DATABASE_URL != '' }}
         run: node security/scripts/audit_security.js
 
       - name: Run multi-tenant isolation tests
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        if: ${{ env.DATABASE_URL != '' }}
         run: node security/scripts/test_isolation.js
 
       - name: Upload audit report
-        if: always()
+        if: always() && env.DATABASE_URL != ''
         uses: actions/upload-artifact@v4
         with:
           name: audit-report
