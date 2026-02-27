@@ -151,12 +151,34 @@ function textLooksLikeAvailabilityIntent(input: string): boolean {
   return (
     normalized.includes('horariodisponivel') ||
     normalized.includes('horariosdisponiveis') ||
+    normalized.includes('horarioslivres') ||
+    normalized.includes('melhorhorario') ||
+    normalized.includes('quantoantes') ||
+    normalized.includes('maiscedo') ||
+    normalized.includes('primeirohorario') ||
     normalized.includes('quaishorarios') ||
     normalized.includes('temhorario') ||
     normalized.includes('temvaga') ||
     normalized.includes('vagas') ||
     normalized.includes('disponivel') ||
     normalized.includes('agenda')
+  );
+}
+
+function textLooksLikeBookingIntent(input: string): boolean {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return false;
+  return (
+    normalized.includes('agendar') ||
+    normalized.includes('agendamento') ||
+    normalized.includes('marcarconsulta') ||
+    normalized.includes('queroagendar') ||
+    normalized.includes('queromarcar') ||
+    normalized.includes('queroumaconsulta') ||
+    normalized.includes('quantoantes') ||
+    normalized.includes('maiscedo') ||
+    normalized.includes('primeirohorario') ||
+    normalized.includes('melhorhorario')
   );
 }
 
@@ -209,7 +231,14 @@ function textLooksLikeAppointmentStatusIntent(input: string): boolean {
     normalized.includes('toagendado') ||
     normalized.includes('toagendada') ||
     normalized.includes('jaestouagendado') ||
-    normalized.includes('jaestouagendada')
+    normalized.includes('jaestouagendada') ||
+    normalized.includes('consultasqueeutenho') ||
+    normalized.includes('quaisconsultaseutenho') ||
+    normalized.includes('quaisconsultasqueeutenho') ||
+    normalized.includes('saberasconsultas') ||
+    normalized.includes('minhasconsultas') ||
+    normalized.includes('consultascomvcs') ||
+    normalized.includes('consultascomvoces')
   );
 }
 
@@ -623,10 +652,14 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
     const latestUserNorm = normalizeTextKey(latestUserText);
 
     const looksLikeAvailabilityIntentCurrent = textLooksLikeAvailabilityIntent(latestUserText);
+    const looksLikeBookingIntentCurrent = textLooksLikeBookingIntent(latestUserText);
     const hasPeriodFollowupCurrent = !!extractPeriodFromText(latestUserText);
     const looksLikeAvailabilityIntent =
       looksLikeAvailabilityIntentCurrent ||
       (hasPeriodFollowupCurrent && textLooksLikeAvailabilityIntent(previousUserText));
+    const looksLikeBookingIntent =
+      looksLikeBookingIntentCurrent ||
+      (hasPeriodFollowupCurrent && textLooksLikeBookingIntent(previousUserText));
 
     const looksLikeCancelIntentCurrent = textLooksLikeCancelIntent(latestUserText);
     const looksLikeAppointmentStatusIntentCurrent = textLooksLikeAppointmentStatusIntent(latestUserText);
@@ -635,6 +668,7 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
       (textLooksLikeCancelIntent(previousUserText) || textLooksLikeAppointmentStatusIntent(previousUserText));
     const shouldForceAppointmentsLookup =
       looksLikeCancelIntentCurrent || looksLikeAppointmentStatusIntentCurrent || looksLikeAppointmentFollowupCurrent;
+    const hasMixedStatusAndAvailabilityIntent = shouldForceAppointmentsLookup && (looksLikeAvailabilityIntent || looksLikeBookingIntent);
 
     const isOnlyOperatingHoursIntent =
       latestUserNorm.includes('funcionamento') &&
@@ -662,7 +696,10 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         ? null
         : (currentDateIso || (looksLikeAvailabilityIntent ? previousDateIso : null));
 
-    const shouldForceAvailabilityLookup = !shouldForceAppointmentsLookup && looksLikeAvailabilityIntent && !isOnlyOperatingHoursIntent;
+    const shouldForceAvailabilityLookup =
+      !shouldForceAppointmentsLookup &&
+      (looksLikeAvailabilityIntent || looksLikeBookingIntent) &&
+      !isOnlyOperatingHoursIntent;
 
     const forcedLookupHint = shouldForceAvailabilityLookup
       ? `ATENÇÃO TÉCNICA: o paciente está pedindo disponibilidade de agenda. Você DEVE chamar a tool "buscar_horarios_disponiveis" antes de responder sobre vagas. ` +
@@ -675,7 +712,8 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
       : '';
 
     const forcedAppointmentsHint = shouldForceAppointmentsLookup
-      ? `ATENÇÃO TÉCNICA: o paciente está perguntando status de consultas (marcada/cancelada) ou pedindo cancelamento. Você DEVE chamar a tool "consultar_agendamentos" antes de responder. Não invente status de consulta.`
+      ? `ATENÇÃO TÉCNICA: o paciente está perguntando status de consultas (marcada/cancelada) ou pedindo cancelamento. Você DEVE chamar a tool "consultar_agendamentos" antes de responder. Não invente status de consulta.` +
+        `${hasMixedStatusAndAvailabilityIntent ? ` Após consultar_agendamentos, o paciente também pediu novos horários. Chame "buscar_horarios_disponiveis" antes da resposta final.` : ''}`
       : '';
 
     const messagesForAI: any[] = [
@@ -786,39 +824,51 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
       }
     ];
 
-    console.log('Calling OpenAI with', messagesForAI.length, 'messages...');
+    const runOpenAiWithTools = async (toolChoice: any): Promise<any> => {
+      console.log('Calling OpenAI with', messagesForAI.length, 'messages. tool_choice=', JSON.stringify(toolChoice));
 
-    let aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${openAiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: messagesForAI,
-        temperature: 0.7,
-        tools: tools,
-        tool_choice: shouldForceAppointmentsLookup
-          ? { type: "function", function: { name: "consultar_agendamentos" } }
-          : shouldForceAvailabilityLookup
-            ? { type: "function", function: { name: "buscar_horarios_disponiveis" } }
-            : "auto",
-        max_tokens: 500,
-      }),
-    });
+      const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openAiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: messagesForAI,
+          temperature: 0.7,
+          tools: tools,
+          tool_choice: toolChoice,
+          max_tokens: 500,
+        }),
+      });
 
-    if (!aiResponse.ok) {
-      const errBody = await aiResponse.text();
-      throw new Error(`OpenAI API Error(${aiResponse.status}): ${errBody}`);
-    }
+      if (!aiResponse.ok) {
+        const errBody = await aiResponse.text();
+        throw new Error(`OpenAI API Error(${aiResponse.status}): ${errBody}`);
+      }
 
-    let aiData = await aiResponse.json();
-    let responseMessage = aiData.choices?.[0]?.message;
+      const aiData = await aiResponse.json();
+      return aiData.choices?.[0]?.message;
+    };
+
+    const maxToolRounds = 4;
+    let currentToolRound = 0;
+    let toolChoice: any = shouldForceAppointmentsLookup
+      ? { type: "function", function: { name: "consultar_agendamentos" } }
+      : shouldForceAvailabilityLookup
+        ? { type: "function", function: { name: "buscar_horarios_disponiveis" } }
+        : "auto";
+
+    let responseMessage = await runOpenAiWithTools(toolChoice);
     let replyText: string = responseMessage?.content || "";
 
     // ── 5. Handle Function Calling (Agendamento no BD) ────────────────────────
-    if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+    while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0) {
+      if (currentToolRound >= maxToolRounds) {
+        throw new Error('OpenAI exceeded maximum tool rounds for this message');
+      }
+      currentToolRound += 1;
       console.log('AI invoked tools:', responseMessage.tool_calls);
 
       messagesForAI.push(responseMessage); // append assistant tool call message to history
@@ -836,120 +886,119 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
             if (Number.isNaN(dataAgendamento.getTime())) {
               toolResponseText = 'ERRO: data/hora inválida. Peça ao paciente para informar novamente o horário desejado.';
               console.log('Validation failed: invalid date input.', args.data_hora_iso);
-              continue;
-            }
+            } else {
+              const duracaoMinutos = Number(args.duracao_minutos) > 0 ? Number(args.duracao_minutos) : 30;
+              const agendamentoSP = getSaoPauloParts(dataAgendamento);
+              const diaSemana = agendamentoSP.weekdayKey;
+              const horaAgendamento = agendamentoSP.timeKey;
+              const inicioSolicitadoMin = agendamentoSP.hour * 60 + agendamentoSP.minute;
+              const fimSolicitadoMin = inicioSolicitadoMin + duracaoMinutos;
 
-            const duracaoMinutos = Number(args.duracao_minutos) > 0 ? Number(args.duracao_minutos) : 30;
-            const agendamentoSP = getSaoPauloParts(dataAgendamento);
-            const diaSemana = agendamentoSP.weekdayKey;
-            const horaAgendamento = agendamentoSP.timeKey;
-            const inicioSolicitadoMin = agendamentoSP.hour * 60 + agendamentoSP.minute;
-            const fimSolicitadoMin = inicioSolicitadoMin + duracaoMinutos;
+              const configDia = configAgenda?.horarios_trabalho?.[diaSemana];
+              const inicioExpedienteMin = configDia?.inicio ? toMinutes(configDia.inicio) : NaN;
+              const fimExpedienteMin = configDia?.fim ? toMinutes(configDia.fim) : NaN;
 
-            const configDia = configAgenda?.horarios_trabalho?.[diaSemana];
-            const inicioExpedienteMin = configDia?.inicio ? toMinutes(configDia.inicio) : NaN;
-            const fimExpedienteMin = configDia?.fim ? toMinutes(configDia.fim) : NaN;
-
-            // 1. Check if it's a workday and within hours
-            if (!configDia || !configDia.inicio || !configDia.fim) {
-              toolResponseText = `ERRO: A clínica não atende neste horário(${diaSemana}, ${horaAgendamento}). Na ${diaSemana}, não atendemos nesse dia. Peça ao paciente para escolher outro horário.`;
-              console.log('Validation failed: no workday configuration.');
-            } else if (!Number.isFinite(inicioExpedienteMin) || !Number.isFinite(fimExpedienteMin)) {
-              toolResponseText = 'ERRO: A agenda da clínica está com horário inválido para este dia. Oriente o paciente a falar com a recepção.';
-              console.log('Validation failed: invalid schedule configuration.');
-            } else if (inicioSolicitadoMin < inicioExpedienteMin || fimSolicitadoMin > fimExpedienteMin) {
-              const infoHours = configDia ? `atendemos das ${configDia.inicio} às ${configDia.fim} ` : "não atendemos nesse dia";
-              toolResponseText = `ERRO: A clínica não atende neste horário(${diaSemana}, ${horaAgendamento}).Na ${diaSemana}, ${infoHours}. Peça ao paciente para escolher outro horário.`;
-              console.log("Validation failed: Outside work hours.");
-            }
-            // 2. Check Lunch Break (Intervalos)
-            else if ((configAgenda?.intervalos || []).some((int: any) => {
-              const intervaloInicio = toMinutes(int.inicio);
-              const intervaloFim = toMinutes(int.fim);
-              if (!Number.isFinite(intervaloInicio) || !Number.isFinite(intervaloFim)) return false;
-              return timeRangesOverlap(inicioSolicitadoMin, fimSolicitadoMin, intervaloInicio, intervaloFim);
-            })) {
-              toolResponseText = `ERRO: O horário solicitado(${horaAgendamento}) cai no intervalo da clínica.Peça ao paciente para escolher outro horário.`;
-              console.log("Validation failed: Lunch break.");
-            }
-            // 3. Check for Conflicts
-            else {
-              const janelaInicio = new Date(dataAgendamento.getTime() - 24 * 60 * 60 * 1000).toISOString();
-              const janelaFim = new Date(dataAgendamento.getTime() + 24 * 60 * 60 * 1000).toISOString();
-
-              const { data: conflitos, error: conflitoError } = await supabaseAdmin
-                .from('agendamentos')
-                .select('id, data_hora, duracao_min')
-                .eq('clinic_id', conversa.clinic_id)
-                .gte('data_hora', janelaInicio)
-                .lte('data_hora', janelaFim)
-                .in('status', ['marcado', 'confirmado'])
-                .order('data_hora', { ascending: true });
-
-              if (conflitoError) {
-                throw new Error('Erro ao verificar conflitos: ' + conflitoError.message);
+              // 1. Check if it's a workday and within hours
+              if (!configDia || !configDia.inicio || !configDia.fim) {
+                toolResponseText = `ERRO: A clínica não atende neste horário(${diaSemana}, ${horaAgendamento}). Na ${diaSemana}, não atendemos nesse dia. Peça ao paciente para escolher outro horário.`;
+                console.log('Validation failed: no workday configuration.');
+              } else if (!Number.isFinite(inicioExpedienteMin) || !Number.isFinite(fimExpedienteMin)) {
+                toolResponseText = 'ERRO: A agenda da clínica está com horário inválido para este dia. Oriente o paciente a falar com a recepção.';
+                console.log('Validation failed: invalid schedule configuration.');
+              } else if (inicioSolicitadoMin < inicioExpedienteMin || fimSolicitadoMin > fimExpedienteMin) {
+                const infoHours = configDia ? `atendemos das ${configDia.inicio} às ${configDia.fim} ` : "não atendemos nesse dia";
+                toolResponseText = `ERRO: A clínica não atende neste horário(${diaSemana}, ${horaAgendamento}).Na ${diaSemana}, ${infoHours}. Peça ao paciente para escolher outro horário.`;
+                console.log("Validation failed: Outside work hours.");
               }
+              // 2. Check Lunch Break (Intervalos)
+              else if ((configAgenda?.intervalos || []).some((int: any) => {
+                const intervaloInicio = toMinutes(int.inicio);
+                const intervaloFim = toMinutes(int.fim);
+                if (!Number.isFinite(intervaloInicio) || !Number.isFinite(intervaloFim)) return false;
+                return timeRangesOverlap(inicioSolicitadoMin, fimSolicitadoMin, intervaloInicio, intervaloFim);
+              })) {
+                toolResponseText = `ERRO: O horário solicitado(${horaAgendamento}) cai no intervalo da clínica.Peça ao paciente para escolher outro horário.`;
+                console.log("Validation failed: Lunch break.");
+              }
+              // 3. Check for Conflicts
+              else {
+                const janelaInicio = new Date(dataAgendamento.getTime() - 24 * 60 * 60 * 1000).toISOString();
+                const janelaFim = new Date(dataAgendamento.getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-              const novoInicioMs = dataAgendamento.getTime();
-              const novoFimMs = novoInicioMs + duracaoMinutos * 60 * 1000;
-
-              const temConflito = (conflitos || []).some((existente: any) => {
-                const inicioExistenteMs = parseIsoInputToDate(existente.data_hora).getTime();
-                if (Number.isNaN(inicioExistenteMs)) return false;
-                const duracaoExistente = Number(existente.duracao_min) > 0 ? Number(existente.duracao_min) : 30;
-                const fimExistenteMs = inicioExistenteMs + duracaoExistente * 60 * 1000;
-                return timeRangesOverlap(novoInicioMs, novoFimMs, inicioExistenteMs, fimExistenteMs);
-              });
-
-              if (temConflito) {
-                toolResponseText = `ERRO: Já existe uma consulta marcada para este horário(${args.data_hora_iso}).Sugira outro horário ao paciente.`;
-                console.log("Validation failed: Scheduling conflict.");
-              } else {
-                // All clear - proceed with booking
-                let paciente_id = null;
-                // rest of the original logic...
-
-                let { data: patientData } = await supabaseAdmin
-                  .from('pacientes')
-                  .select('id')
-                  .eq('clinic_id', conversa.clinic_id)
-                  .eq('telefone', recipientPhone)
-                  .maybeSingle();
-
-                if (!patientData) {
-                  const { data: newPatient, error: newPatientError } = await supabaseAdmin
-                    .from('pacientes')
-                    .insert({ clinic_id: conversa.clinic_id, nome: args.nome_paciente, telefone: recipientPhone })
-                    .select('id')
-                    .single();
-                  if (newPatientError) throw new Error("Erro ao criar paciente: " + newPatientError.message);
-                  paciente_id = newPatient.id;
-                } else {
-                  paciente_id = patientData.id;
-                  await supabaseAdmin.from('pacientes').update({ nome: args.nome_paciente }).eq('id', paciente_id);
-                }
-
-                const pagStatus = clinica?.cobrar_sinal ? 'pendente' : 'nao_aplicavel';
-
-                const { error: insertErr } = await supabaseAdmin
+                const { data: conflitos, error: conflitoError } = await supabaseAdmin
                   .from('agendamentos')
-                  .insert({
-                    clinic_id: conversa.clinic_id, conversa_id, paciente_id,
-                    duracao_min: duracaoMinutos, observacao: args.procedimento_esperado,
-                    data_hora: dataAgendamento.toISOString(), status: 'marcado', pagamento_status: pagStatus,
-                    paciente_nome: args.nome_paciente, paciente_telefone: recipientPhone
-                  });
-                if (insertErr) throw new Error("Erro ao agendar: " + insertErr.message);
+                  .select('id, data_hora, duracao_min')
+                  .eq('clinic_id', conversa.clinic_id)
+                  .gte('data_hora', janelaInicio)
+                  .lte('data_hora', janelaFim)
+                  .in('status', ['marcado', 'confirmado'])
+                  .order('data_hora', { ascending: true });
 
-                if (clinica?.cobrar_sinal) {
-                  const valorSinal = clinica.valor_sinal ?? '0,00';
-                  const chavePix = clinica.chave_pix ?? '[não configurada]';
-                  toolResponseText = `Agendamento pré - reservado para o dia ${args.data_hora_iso}. AVISE O PACIENTE que ele precisa pagar o sinal de R$ ${valorSinal} na chave PIX ${chavePix} para garantir a vaga e peça o comprovante.`;
-                } else {
-                  toolResponseText = `O agendamento foi realizado com sucesso no sistema para o dia ${args.data_hora_iso}.`;
+                if (conflitoError) {
+                  throw new Error('Erro ao verificar conflitos: ' + conflitoError.message);
                 }
 
-                console.log("Agendamento criado via Tool com sucesso!");
+                const novoInicioMs = dataAgendamento.getTime();
+                const novoFimMs = novoInicioMs + duracaoMinutos * 60 * 1000;
+
+                const temConflito = (conflitos || []).some((existente: any) => {
+                  const inicioExistenteMs = parseIsoInputToDate(existente.data_hora).getTime();
+                  if (Number.isNaN(inicioExistenteMs)) return false;
+                  const duracaoExistente = Number(existente.duracao_min) > 0 ? Number(existente.duracao_min) : 30;
+                  const fimExistenteMs = inicioExistenteMs + duracaoExistente * 60 * 1000;
+                  return timeRangesOverlap(novoInicioMs, novoFimMs, inicioExistenteMs, fimExistenteMs);
+                });
+
+                if (temConflito) {
+                  toolResponseText = `ERRO: Já existe uma consulta marcada para este horário(${args.data_hora_iso}).Sugira outro horário ao paciente.`;
+                  console.log("Validation failed: Scheduling conflict.");
+                } else {
+                  // All clear - proceed with booking
+                  let paciente_id = null;
+                  // rest of the original logic...
+
+                  let { data: patientData } = await supabaseAdmin
+                    .from('pacientes')
+                    .select('id')
+                    .eq('clinic_id', conversa.clinic_id)
+                    .eq('telefone', recipientPhone)
+                    .maybeSingle();
+
+                  if (!patientData) {
+                    const { data: newPatient, error: newPatientError } = await supabaseAdmin
+                      .from('pacientes')
+                      .insert({ clinic_id: conversa.clinic_id, nome: args.nome_paciente, telefone: recipientPhone })
+                      .select('id')
+                      .single();
+                    if (newPatientError) throw new Error("Erro ao criar paciente: " + newPatientError.message);
+                    paciente_id = newPatient.id;
+                  } else {
+                    paciente_id = patientData.id;
+                    await supabaseAdmin.from('pacientes').update({ nome: args.nome_paciente }).eq('id', paciente_id);
+                  }
+
+                  const pagStatus = clinica?.cobrar_sinal ? 'pendente' : 'nao_aplicavel';
+
+                  const { error: insertErr } = await supabaseAdmin
+                    .from('agendamentos')
+                    .insert({
+                      clinic_id: conversa.clinic_id, conversa_id, paciente_id,
+                      duracao_min: duracaoMinutos, observacao: args.procedimento_esperado,
+                      data_hora: dataAgendamento.toISOString(), status: 'marcado', pagamento_status: pagStatus,
+                      paciente_nome: args.nome_paciente, paciente_telefone: recipientPhone
+                    });
+                  if (insertErr) throw new Error("Erro ao agendar: " + insertErr.message);
+
+                  if (clinica?.cobrar_sinal) {
+                    const valorSinal = clinica.valor_sinal ?? '0,00';
+                    const chavePix = clinica.chave_pix ?? '[não configurada]';
+                    toolResponseText = `Agendamento pré - reservado para o dia ${args.data_hora_iso}. AVISE O PACIENTE que ele precisa pagar o sinal de R$ ${valorSinal} na chave PIX ${chavePix} para garantir a vaga e peça o comprovante.`;
+                  } else {
+                    toolResponseText = `O agendamento foi realizado com sucesso no sistema para o dia ${args.data_hora_iso}.`;
+                  }
+
+                  console.log("Agendamento criado via Tool com sucesso!");
+                }
               }
             }
           } catch (e: any) {
@@ -1308,23 +1357,9 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
           content: toolResponseText,
         });
       }
-
-      // Second call to OpenAI with tool results
-      aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openAiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: messagesForAI,
-          temperature: 0.7,
-        }),
-      });
-
-      aiData = await aiResponse.json();
-      replyText = aiData.choices?.[0]?.message?.content;
+      toolChoice = "auto";
+      responseMessage = await runOpenAiWithTools(toolChoice);
+      replyText = responseMessage?.content || "";
     }
 
     if (!replyText) {
