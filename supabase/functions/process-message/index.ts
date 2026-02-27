@@ -80,6 +80,25 @@ const WEEKDAY_INPUT_ALIASES: Record<string, string> = {
   domingo: 'domingo',
 };
 
+const WEEKDAY_ORDER = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+
+const PERIOD_INPUT_ALIASES: Record<string, 'manha' | 'tarde' | 'noite'> = {
+  manha: 'manha',
+  manham: 'manha',
+  manhazinha: 'manha',
+  matutino: 'manha',
+  tarde: 'tarde',
+  vespertino: 'tarde',
+  noite: 'noite',
+  noturno: 'noite',
+};
+
+const PERIOD_LABELS: Record<'manha' | 'tarde' | 'noite', string> = {
+  manha: 'manhã',
+  tarde: 'tarde',
+  noite: 'noite',
+};
+
 function pad2(value: number): string {
   return String(value).padStart(2, '0');
 }
@@ -98,6 +117,12 @@ function normalizeWeekdayInput(input: unknown): string | null {
   return WEEKDAY_INPUT_ALIASES[key] || null;
 }
 
+function normalizePeriodInput(input: unknown): 'manha' | 'tarde' | 'noite' | null {
+  const key = normalizeTextKey(input);
+  if (!key) return null;
+  return PERIOD_INPUT_ALIASES[key] || null;
+}
+
 function extractWeekdayFromText(input: string): string | null {
   const normalized = normalizeTextKey(input);
   if (!normalized) return null;
@@ -107,6 +132,54 @@ function extractWeekdayFromText(input: string): string | null {
   }
 
   return null;
+}
+
+function extractPeriodFromText(input: string): 'manha' | 'tarde' | 'noite' | null {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return null;
+
+  for (const [alias, period] of Object.entries(PERIOD_INPUT_ALIASES)) {
+    if (normalized.includes(alias)) return period;
+  }
+
+  return null;
+}
+
+function textLooksLikeAvailabilityIntent(input: string): boolean {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return false;
+  return (
+    normalized.includes('horariodisponivel') ||
+    normalized.includes('horariosdisponiveis') ||
+    normalized.includes('quaishorarios') ||
+    normalized.includes('temhorario') ||
+    normalized.includes('temvaga') ||
+    normalized.includes('vagas') ||
+    normalized.includes('disponivel') ||
+    normalized.includes('agenda')
+  );
+}
+
+function textLooksLikeAllDaysRequest(input: string): boolean {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return false;
+  return (
+    normalized.includes('todososdias') ||
+    normalized.includes('todosdias') ||
+    normalized.includes('diasdasemana') ||
+    normalized.includes('semanainteira') ||
+    normalized.includes('semanatoda')
+  );
+}
+
+function textLooksLikeNextWeekRequest(input: string): boolean {
+  const normalized = normalizeTextKey(input);
+  if (!normalized) return false;
+  return (
+    normalized.includes('semanaquevem') ||
+    normalized.includes('proximasemana') ||
+    normalized.includes('semanaseguinte')
+  );
 }
 
 function extractDateIsoFromText(input: string, referenceYear: number): string | null {
@@ -140,6 +213,10 @@ function getWeekdayLabel(weekdayKey: string): string {
   return WEEKDAY_LABELS[weekdayKey] || weekdayKey;
 }
 
+function getPeriodLabel(period: 'manha' | 'tarde' | 'noite'): string {
+  return PERIOD_LABELS[period] || period;
+}
+
 function toMinutes(hhmm: string): number {
   const [h, m] = hhmm.split(':').map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return NaN;
@@ -164,6 +241,25 @@ function normalizeDateKeyInput(input: unknown): string | null {
   const dt = parseIsoInputToDate(raw);
   if (Number.isNaN(dt.getTime())) return null;
   return getSaoPauloParts(dt).dateKey;
+}
+
+function getNextWeekRange(nowDate: Date): { startDateKey: string; endDateKey: string; daysUntilStart: number } {
+  const nowSP = getSaoPauloParts(nowDate);
+  const currentWeekdayIndex = WEEKDAY_ORDER.indexOf(nowSP.weekdayKey);
+  let daysUntilNextMonday = currentWeekdayIndex >= 0 ? (8 - currentWeekdayIndex) % 7 : 7;
+  if (daysUntilNextMonday === 0) {
+    daysUntilNextMonday = 7;
+  }
+
+  const todayStartSP = new Date(buildSaoPauloIso(nowSP.year, nowSP.month, nowSP.day, 0, 0));
+  const nextMonday = new Date(todayStartSP.getTime() + daysUntilNextMonday * 24 * 60 * 60 * 1000);
+  const nextSunday = new Date(nextMonday.getTime() + 6 * 24 * 60 * 60 * 1000);
+
+  return {
+    startDateKey: getSaoPauloParts(nextMonday).dateKey,
+    endDateKey: getSaoPauloParts(nextSunday).dateKey,
+    daysUntilStart: daysUntilNextMonday,
+  };
 }
 
 function getSaoPauloParts(date: Date): SaoPauloDateParts {
@@ -421,6 +517,8 @@ serve(async (req) => {
 - DADOS OBRIGATÓRIOS PARA AGENDAR: 1) Nome (se não tiver no cadastro, peça apenas o nome), 2) Convênio (apenas para consultas dermatológicas), 3) Data/Hora desejada, 4) Procedimento.
 - PROATIVIDADE COM AGENDA: Se o paciente já disse o que quer e a data, use IMEDIATAMENTE "buscar_horarios_disponiveis" e mostre 3 opções de horário livres de forma animada e direta.
 - Se o paciente pedir DIA específico (ex.: segunda, terça) ou DATA específica, ao usar "buscar_horarios_disponiveis" PREENCHA obrigatoriamente o parâmetro "dia_semana" ou "data_iso".
+- Se o paciente pedir "todos os dias", "semana toda" ou "semana que vem", use "buscar_horarios_disponiveis" com "todos_os_dias=true" e, quando aplicável, "semana_que_vem=true".
+- Se o paciente pedir período (ex.: manhã, tarde, noite), use "periodo" na tool para filtrar corretamente.
 - NUNCA afirme que um dia está fechado/sem atendimento sem checar os HORÁRIOS DA CLÍNICA e sem consultar "buscar_horarios_disponiveis" com filtro do dia/data pedido.
 - Se não houver vaga em um dia que a clínica funciona, diga "sem vagas nesse dia" (agenda lotada), e NÃO "não atendemos nesse dia".
 - ESTADO ATUAL DA CLÍNICA: ${isClosedNow ? 'FECHADA' : 'ABERTA'}.
@@ -467,31 +565,51 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
       .filter((m: any) => m.role === 'user' && typeof m.conteudo === 'string')
       .slice(-6)
       .map((m: any) => m.conteudo);
-    const availabilityContextText = recentUserTexts.join(' ');
-    const availabilityContextNorm = normalizeTextKey(availabilityContextText);
+    const latestUserText = String(conteudo ?? recentUserTexts[recentUserTexts.length - 1] ?? '');
+    const previousUserText = recentUserTexts.length >= 2 ? String(recentUserTexts[recentUserTexts.length - 2]) : '';
+    const latestUserNorm = normalizeTextKey(latestUserText);
 
+    const looksLikeAvailabilityIntentCurrent = textLooksLikeAvailabilityIntent(latestUserText);
+    const hasPeriodFollowupCurrent = !!extractPeriodFromText(latestUserText);
     const looksLikeAvailabilityIntent =
-      availabilityContextNorm.includes('horariodisponivel') ||
-      availabilityContextNorm.includes('horariosdisponiveis') ||
-      availabilityContextNorm.includes('quaishorarios') ||
-      availabilityContextNorm.includes('temhorario') ||
-      availabilityContextNorm.includes('temvaga') ||
-      availabilityContextNorm.includes('vagas') ||
-      availabilityContextNorm.includes('disponivel');
+      looksLikeAvailabilityIntentCurrent ||
+      (hasPeriodFollowupCurrent && textLooksLikeAvailabilityIntent(previousUserText));
 
     const isOnlyOperatingHoursIntent =
-      availabilityContextNorm.includes('funcionamento') &&
-      !availabilityContextNorm.includes('disponivel') &&
-      !availabilityContextNorm.includes('vaga');
+      latestUserNorm.includes('funcionamento') &&
+      !looksLikeAvailabilityIntentCurrent;
+
+    const forcedLookupAllDays = textLooksLikeAllDaysRequest(latestUserText);
+    const forcedLookupNextWeek =
+      textLooksLikeNextWeekRequest(latestUserText) ||
+      (forcedLookupAllDays && textLooksLikeNextWeekRequest(previousUserText));
+    const forcedLookupPeriod =
+      extractPeriodFromText(latestUserText) ||
+      (hasPeriodFollowupCurrent ? extractPeriodFromText(previousUserText) : null);
+
+    const currentWeekday = extractWeekdayFromText(latestUserText);
+    const previousWeekday = extractWeekdayFromText(previousUserText);
+    const forcedLookupWeekday =
+      forcedLookupAllDays || forcedLookupNextWeek
+        ? null
+        : (currentWeekday || (looksLikeAvailabilityIntent ? previousWeekday : null));
+
+    const currentDateIso = extractDateIsoFromText(latestUserText, nowSP.year);
+    const previousDateIso = extractDateIsoFromText(previousUserText, nowSP.year);
+    const forcedLookupDateIso =
+      forcedLookupAllDays || forcedLookupNextWeek
+        ? null
+        : (currentDateIso || (looksLikeAvailabilityIntent ? previousDateIso : null));
 
     const shouldForceAvailabilityLookup = looksLikeAvailabilityIntent && !isOnlyOperatingHoursIntent;
-    const forcedLookupWeekday = extractWeekdayFromText(availabilityContextText);
-    const forcedLookupDateIso = extractDateIsoFromText(availabilityContextText, nowSP.year);
 
     const forcedLookupHint = shouldForceAvailabilityLookup
       ? `ATENÇÃO TÉCNICA: o paciente está pedindo disponibilidade de agenda. Você DEVE chamar a tool "buscar_horarios_disponiveis" antes de responder sobre vagas. ` +
+        `${forcedLookupNextWeek ? `Use semana_que_vem=true. ` : ''}` +
+        `${forcedLookupAllDays ? `Use todos_os_dias=true. ` : ''}` +
         `${forcedLookupWeekday ? `Use dia_semana="${forcedLookupWeekday}". ` : ''}` +
         `${forcedLookupDateIso ? `Use data_iso="${forcedLookupDateIso}". ` : ''}` +
+        `${forcedLookupPeriod ? `Use periodo="${forcedLookupPeriod}". ` : ''}` +
         `Não responda "sem vagas" sem consultar a tool.`
       : '';
 
@@ -591,7 +709,10 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
             properties: {
               dias_a_frente: { type: "number", description: "Quantos dias à frente buscar (padrão 5)", default: 5 },
               dia_semana: { type: "string", description: "Dia da semana solicitado pelo paciente (ex.: segunda, terça, quarta...)." },
-              data_iso: { type: "string", description: "Data específica solicitada pelo paciente em YYYY-MM-DD ou ISO 8601." }
+              data_iso: { type: "string", description: "Data específica solicitada pelo paciente em YYYY-MM-DD ou ISO 8601." },
+              periodo: { type: "string", description: "Filtrar por período do dia: manha, tarde ou noite." },
+              todos_os_dias: { type: "boolean", description: "Quando true, buscar horários em todos os dias do período (não só um dia específico)." },
+              semana_que_vem: { type: "boolean", description: "Quando true, buscar apenas a próxima semana completa (segunda a domingo)." }
             },
             required: []
           }
@@ -902,19 +1023,35 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
         } else if (toolCall.function.name === 'buscar_horarios_disponiveis') {
           try {
             const args = JSON.parse(toolCall.function.arguments || '{}');
-            const diaSemanaSolicitado = normalizeWeekdayInput(args.dia_semana) || forcedLookupWeekday;
-            const dataSolicitadaKey = normalizeDateKeyInput(args.data_iso) || forcedLookupDateIso;
+            let diaSemanaSolicitado = normalizeWeekdayInput(args.dia_semana) || forcedLookupWeekday;
+            let dataSolicitadaKey = normalizeDateKeyInput(args.data_iso) || forcedLookupDateIso;
+            const periodoSolicitado = normalizePeriodInput(args.periodo) || forcedLookupPeriod;
+            const solicitarTodosOsDias = Boolean(args.todos_os_dias) || forcedLookupAllDays;
+            const solicitarSemanaQueVem = Boolean(args.semana_que_vem) || forcedLookupNextWeek;
             const diasAFrenteRaw = Number(args.dias_a_frente);
             let diasAFrente = Number.isFinite(diasAFrenteRaw) && diasAFrenteRaw > 0
               ? Math.min(Math.floor(diasAFrenteRaw), 14)
               : 5;
             const duracaoPadraoMin = 30;
+            const maxSlots = solicitarTodosOsDias || solicitarSemanaQueVem
+              ? 240
+              : (periodoSolicitado ? 80 : 10);
+
+            if (solicitarTodosOsDias || solicitarSemanaQueVem) {
+              diaSemanaSolicitado = null;
+              dataSolicitadaKey = null;
+            }
+
+            const nextWeekRange = solicitarSemanaQueVem ? getNextWeekRange(new Date()) : null;
 
             // Para filtro de dia/data específica, expandir janela para encontrar a próxima ocorrência com segurança.
             if (dataSolicitadaKey) {
               diasAFrente = Math.max(diasAFrente, 31);
             } else if (diaSemanaSolicitado) {
               diasAFrente = Math.max(diasAFrente, 21);
+            }
+            if (nextWeekRange) {
+              diasAFrente = Math.max(diasAFrente, nextWeekRange.daysUntilStart + 7);
             }
 
             // Buscar agendamentos existentes nos próximos X dias
@@ -947,12 +1084,15 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
             const diasProcessados = new Set<string>();
             let primeiraDataDoDiaSolicitado: string | null = null;
 
-            for (let deslocamento = 0; diasProcessados.size < diasAFrente && slotsDisponiveis.length < 10; deslocamento++) {
+            for (let deslocamento = 0; diasProcessados.size < diasAFrente && slotsDisponiveis.length < maxSlots; deslocamento++) {
               const diaRef = new Date(agora.getTime() + deslocamento * 24 * 60 * 60 * 1000);
               const diaSP = getSaoPauloParts(diaRef);
               if (diasProcessados.has(diaSP.dateKey)) continue;
               diasProcessados.add(diaSP.dateKey);
 
+              if (nextWeekRange && (diaSP.dateKey < nextWeekRange.startDateKey || diaSP.dateKey > nextWeekRange.endDateKey)) {
+                continue;
+              }
               if (dataSolicitadaKey && diaSP.dateKey !== dataSolicitadaKey) {
                 continue;
               }
@@ -980,6 +1120,16 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
                 const m = totalMin % 60;
                 const inicioSlotMin = totalMin;
                 const fimSlotMin = totalMin + duracaoPadraoMin;
+
+                if (periodoSolicitado === 'manha' && h >= 12) {
+                  continue;
+                }
+                if (periodoSolicitado === 'tarde' && (h < 12 || h >= 18)) {
+                  continue;
+                }
+                if (periodoSolicitado === 'noite' && h < 18) {
+                  continue;
+                }
 
                 // Pular intervalos (almoço)
                 if ((configAgenda?.intervalos || []).some((intervalo: any) => {
@@ -1016,16 +1166,26 @@ Se o paciente pedir para cancelar, pedir para falar com um humano, ou se você n
                 });
                 slotsDisponiveis.push(`${dtFormatada}(ISO: ${slotDate.toISOString()})`);
 
-                if (slotsDisponiveis.length >= 10) break;
+                if (slotsDisponiveis.length >= maxSlots) break;
               }
-              if (slotsDisponiveis.length >= 10) break;
+              if (slotsDisponiveis.length >= maxSlots) break;
             }
 
-            const filtroTexto = dataSolicitadaKey
-              ? `na data ${dataSolicitadaKey}`
-              : diaSemanaSolicitado
-                ? `na ${getWeekdayLabel(diaSemanaSolicitado)}`
-                : null;
+            const filtros: string[] = [];
+            if (solicitarSemanaQueVem) {
+              filtros.push('na próxima semana');
+            }
+            if (dataSolicitadaKey) {
+              filtros.push(`na data ${dataSolicitadaKey}`);
+            } else if (diaSemanaSolicitado) {
+              filtros.push(`na ${getWeekdayLabel(diaSemanaSolicitado)}`);
+            } else if (solicitarTodosOsDias) {
+              filtros.push('em todos os dias');
+            }
+            if (periodoSolicitado) {
+              filtros.push(`no período da ${getPeriodLabel(periodoSolicitado)}`);
+            }
+            const filtroTexto = filtros.length > 0 ? filtros.join(' ') : null;
 
             if (slotsDisponiveis.length === 0) {
               if (filtroTexto) {
