@@ -12,10 +12,35 @@ serve(async (req) => {
     }
 
     try {
+        const authHeader = req.headers.get('Authorization')
+        if (!authHeader) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            })
+        }
+
+        const supabaseAuth = createClient(
+            Deno.env.get('SUPABASE_URL') ?? '',
+            Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+            { global: { headers: { Authorization: authHeader } } }
+        )
+
+        const { data: { user }, error: userError } = await supabaseAuth.auth.getUser()
+        if (userError || !user) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            })
+        }
+
         const { clinic_id, plan_id, billing_cycle } = await req.json()
 
         if (!clinic_id || !plan_id || !billing_cycle) {
             return new Response(JSON.stringify({ error: 'clinic_id, plan_id e billing_cycle são obrigatórios' }), {
+                status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            })
+        }
+        if (billing_cycle !== 'monthly' && billing_cycle !== 'yearly') {
+            return new Response(JSON.stringify({ error: 'billing_cycle inválido' }), {
                 status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             })
         }
@@ -24,6 +49,30 @@ serve(async (req) => {
             Deno.env.get('SUPABASE_URL') ?? '',
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
         )
+
+        const { data: ownerClinic } = await supabaseAdmin
+            .from('clinicas')
+            .select('id')
+            .eq('id', clinic_id)
+            .eq('user_id', user.id)
+            .maybeSingle()
+
+        let isClinicAdmin = !!ownerClinic
+        if (!isClinicAdmin) {
+            const { data: clinicMember } = await supabaseAdmin
+                .from('clinic_users')
+                .select('role')
+                .eq('clinic_id', clinic_id)
+                .eq('user_id', user.id)
+                .maybeSingle()
+            isClinicAdmin = !!clinicMember && ['admin', 'owner'].includes(String(clinicMember.role || '').toLowerCase())
+        }
+
+        if (!isClinicAdmin) {
+            return new Response(JSON.stringify({ error: 'Forbidden' }), {
+                status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            })
+        }
 
         // 1. Buscar dados da clínica
         const { data: clinica, error: clinicaErr } = await supabaseAdmin
@@ -72,6 +121,9 @@ serve(async (req) => {
                 }),
             })
             const customerData = await customerRes.json()
+            if (!customerRes.ok || !customerData?.id) {
+                throw new Error(`Erro ao criar cliente no Asaas: ${JSON.stringify(customerData)}`)
+            }
             asaas_customer_id = customerData.id
             console.log('Asaas customer created:', asaas_customer_id)
 
@@ -89,6 +141,9 @@ serve(async (req) => {
                 }),
             })
             const subData = await subRes.json()
+            if (!subRes.ok || !subData?.id) {
+                throw new Error(`Erro ao criar assinatura no Asaas: ${JSON.stringify(subData)}`)
+            }
             asaas_subscription_id = subData.id
             payment_url = subData.paymentLink || null
             console.log('Asaas subscription created:', asaas_subscription_id)

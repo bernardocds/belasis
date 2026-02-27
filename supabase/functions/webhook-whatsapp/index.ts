@@ -16,7 +16,11 @@ serve(async (req) => {
     let payload;
     try {
       payload = await req.json();
-      console.log("Webhook payload received:", JSON.stringify(payload, null, 2));
+      console.log("Webhook payload received:", JSON.stringify({
+        event: payload?.event,
+        instance: payload?.instance,
+        hasData: !!payload?.data,
+      }));
     } catch (e) {
       return new Response('Invalid JSON', { status: 400 });
     }
@@ -26,8 +30,14 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    // DEBUG: Save raw payload
-    await supabaseAdmin.from('debug_webhook_logs').insert({ payload: payload });
+    // DEBUG: Save sanitized webhook metadata only (avoid storing full payload/PII)
+    await supabaseAdmin.from('debug_webhook_logs').insert({
+      payload: {
+        event: payload?.event,
+        instance: payload?.instance,
+        has_data: !!payload?.data,
+      }
+    });
 
     // 2. Identify the Event Type
     const event = payload.event;

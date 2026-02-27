@@ -9,6 +9,12 @@ const corsHeaders = {
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+function maskPhone(phone: string): string {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length <= 4) return '****';
+    return `${digits.slice(0, 2)}****${digits.slice(-2)}`;
+}
+
 serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders })
@@ -204,7 +210,7 @@ serve(async (req) => {
             mediaType = messageType;
         }
 
-        console.log('Message from:', patientPhone, '| type:', mediaType || 'text', '| content:', content.substring(0, 80));
+        console.log('Message from:', maskPhone(patientPhone), '| type:', mediaType || 'text', '| content_length:', content.length);
 
         // ── Find or Create Conversation ──────────────────────────────────────────
         const { data: conversaList, error: conversaError } = await supabaseAdmin

@@ -15,6 +15,28 @@ serve(async (req) => {
     }
 
     try {
+        const authHeader = req.headers.get('Authorization');
+        if (!authHeader) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 401,
+            });
+        }
+
+        const supabaseAuth = createClient(
+            Deno.env.get('SUPABASE_URL') ?? '',
+            Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+            { global: { headers: { Authorization: authHeader } } }
+        );
+
+        const { data: { user }, error: userError } = await supabaseAuth.auth.getUser();
+        if (userError || !user) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 401,
+            });
+        }
+
         const { conversa_id, mensagem } = await req.json();
 
         if (!conversa_id || !mensagem) {
@@ -40,6 +62,31 @@ serve(async (req) => {
             throw new Error('Conversa não encontrada');
         }
 
+        const { data: clinicOwner } = await supabaseAdmin
+            .from('clinicas')
+            .select('id')
+            .eq('id', conversa.clinic_id)
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+        let hasClinicAccess = !!clinicOwner;
+        if (!hasClinicAccess) {
+            const { data: clinicMember } = await supabaseAdmin
+                .from('clinic_users')
+                .select('clinic_id')
+                .eq('clinic_id', conversa.clinic_id)
+                .eq('user_id', user.id)
+                .maybeSingle();
+            hasClinicAccess = !!clinicMember;
+        }
+
+        if (!hasClinicAccess) {
+            return new Response(JSON.stringify({ error: 'Forbidden' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 403,
+            });
+        }
+
         // A instância na Evolution API usa o próprio clinic_id como nome
         const instanceName = conversa.clinic_id;
 
@@ -62,7 +109,7 @@ serve(async (req) => {
         });
 
         const sendData = await sendRes.json();
-        console.log('Send result:', JSON.stringify(sendData));
+        console.log('Send result status:', sendRes.status);
 
         if (!sendRes.ok) {
             throw new Error(`Evolution API error: ${JSON.stringify(sendData)}`);

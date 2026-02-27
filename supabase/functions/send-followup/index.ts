@@ -10,6 +10,19 @@ serve(async (req) => {
     if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
     try {
+        const internalCronSecret = Deno.env.get('INTERNAL_CRON_SECRET');
+        if (internalCronSecret) {
+            const providedSecret = req.headers.get('x-internal-secret');
+            if (!providedSecret || providedSecret !== internalCronSecret) {
+                return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                    status: 401,
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                });
+            }
+        } else {
+            console.warn('INTERNAL_CRON_SECRET not configured. send-followup is not protected by internal secret.');
+        }
+
         const supabase = createClient(
             Deno.env.get("SUPABASE_URL")!,
             Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!

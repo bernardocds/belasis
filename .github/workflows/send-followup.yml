@@ -13,6 +13,7 @@ jobs:
           curl -s -X POST \
             "https://fvxxlrzaqqewihuabcxu.supabase.co/functions/v1/send-followup" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "x-internal-secret: ${{ secrets.INTERNAL_CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             -d '{}' \
             --max-time 30

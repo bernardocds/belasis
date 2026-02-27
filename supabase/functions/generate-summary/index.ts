@@ -10,7 +10,29 @@ serve(async (req) => {
     if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
     try {
-        const supabase = createClient(
+        const authHeader = req.headers.get("Authorization");
+        if (!authHeader) {
+            return new Response(JSON.stringify({ error: "Unauthorized" }), {
+                status: 401,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+
+        const supabaseAuth = createClient(
+            Deno.env.get("SUPABASE_URL")!,
+            Deno.env.get("SUPABASE_ANON_KEY")!,
+            { global: { headers: { Authorization: authHeader } } }
+        );
+
+        const { data: { user }, error: userError } = await supabaseAuth.auth.getUser();
+        if (userError || !user) {
+            return new Response(JSON.stringify({ error: "Unauthorized" }), {
+                status: 401,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+
+        const supabaseAdmin = createClient(
             Deno.env.get("SUPABASE_URL")!,
             Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
         );
@@ -21,14 +43,40 @@ serve(async (req) => {
         }
 
         // Fetch atendimento
-        const { data: atendimento, error } = await supabase
+        const { data: atendimento, error } = await supabaseAdmin
             .from("atendimentos")
-            .select("queixa_principal, anamnese, evolucao, conduta, pacientes(nome)")
+            .select("clinic_id, queixa_principal, anamnese, evolucao, conduta, pacientes(nome)")
             .eq("id", atendimento_id)
             .single();
 
         if (error || !atendimento) {
             return new Response(JSON.stringify({ error: "Atendimento not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+
+        const clinicId = (atendimento as any).clinic_id;
+        const { data: ownerClinic } = await supabaseAdmin
+            .from("clinicas")
+            .select("id")
+            .eq("id", clinicId)
+            .eq("user_id", user.id)
+            .maybeSingle();
+
+        let hasClinicAccess = !!ownerClinic;
+        if (!hasClinicAccess) {
+            const { data: clinicMember } = await supabaseAdmin
+                .from("clinic_users")
+                .select("clinic_id")
+                .eq("clinic_id", clinicId)
+                .eq("user_id", user.id)
+                .maybeSingle();
+            hasClinicAccess = !!clinicMember;
+        }
+
+        if (!hasClinicAccess) {
+            return new Response(JSON.stringify({ error: "Forbidden" }), {
+                status: 403,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
         }
 
         const pacienteNome = (atendimento as any).pacientes?.nome || "Paciente";
@@ -77,7 +125,7 @@ Gere o resumo no formato:
         const resumo = result.choices[0].message.content;
 
         // Save to atendimento
-        await supabase.from("atendimentos").update({ resumo_ia: resumo }).eq("id", atendimento_id);
+        await supabaseAdmin.from("atendimentos").update({ resumo_ia: resumo }).eq("id", atendimento_id);
 
         return new Response(JSON.stringify({ resumo }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
