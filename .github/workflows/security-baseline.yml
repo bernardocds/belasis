@@ -1,0 +1,82 @@
+name: Security Baseline
+
+on:
+  pull_request:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '30 9 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-and-types:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Audit root dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: '2.2.4'
+
+      - name: Deno check edge functions
+        run: |
+          for entry in supabase/functions/*/index.ts; do
+            echo "Checking $entry"
+            deno check "$entry"
+          done
+
+  db-security:
+    if: ${{ secrets.DATABASE_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Run RLS audit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: node security/scripts/audit_security.js
+
+      - name: Run multi-tenant isolation tests
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: node security/scripts/test_isolation.js
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: /tmp/audit_report.json
