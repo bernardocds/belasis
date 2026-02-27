@@ -380,6 +380,18 @@ function formatDateTimeSP(date: Date): string {
   });
 }
 
+function formatDateTimeSPWithWeekday(date: Date): string {
+  return date.toLocaleDateString('pt-BR', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: SAO_PAULO_TZ,
+  });
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -475,15 +487,21 @@ serve(async (req) => {
 
     // ── 2.1 Fetch patient's active appointments to provide immediate context ─
     const recipientPhoneContext = conversa.paciente_telefone.replace('@s.whatsapp.net', '').replace('@c.us', '');
-    const nowIso = new Date().toISOString();
-    const { data: agendamentosAtivos } = await supabaseAdmin
+    const nowMs = Date.now();
+    const activeWindowStartIso = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+    const { data: agendamentosAtivosRaw } = await supabaseAdmin
       .from('agendamentos')
       .select('id, data_hora, status, observacao')
       .eq('clinic_id', conversa.clinic_id)
       .eq('paciente_telefone', recipientPhoneContext)
       .in('status', ['marcado', 'confirmado'])
-      .gte('data_hora', nowIso)
+      .gte('data_hora', activeWindowStartIso)
       .order('data_hora', { ascending: true });
+
+    const agendamentosAtivos = (agendamentosAtivosRaw || []).filter((a: any) => {
+      const ts = parseIsoInputToDate(a.data_hora).getTime();
+      return Number.isFinite(ts) && ts >= nowMs;
+    });
 
     const { data: canceladosRecentes } = await supabaseAdmin
       .from('agendamentos')
@@ -498,8 +516,8 @@ serve(async (req) => {
     let agendamentosContextText = "O paciente NÃO possui consultas ativas FUTURAS agendadas no momento.";
     if (agendamentosAtivos && agendamentosAtivos.length > 0) {
       const listAgs = agendamentosAtivos.map((a: any, i: number) => {
-        const dt = new Date(a.data_hora);
-        const dataFormatada = formatDateTimeSP(dt);
+        const dt = parseIsoInputToDate(a.data_hora);
+        const dataFormatada = formatDateTimeSPWithWeekday(dt);
         return `${i + 1}. Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} [ref:${a.id}] | Status: ${a.status}`;
       }).join('\n');
       agendamentosContextText = `CONSULTAS AGENDADAS ATIVAS FUTURAS DO PACIENTE:\n${listAgs}\n* IMPORTANTE: Não revele o código [ref:...], use-o apenas se for cancelar/reagendar.`;
@@ -604,6 +622,7 @@ serve(async (req) => {
       `- Se o pedido for misto (status + novo agendamento), consulte primeiro "consultar_agendamentos", depois "buscar_horarios_disponiveis", e só então responda.\n` +
       `- Nunca inventar horários. Exiba apenas horários retornados pela ferramenta.\n` +
       `- Se um dia tem expediente mas sem vagas, diga "agenda lotada nesse dia". Não diga "não atendemos nesse dia".\n` +
+      `- Ao informar consulta existente, priorize data e hora absolutas. Não use termos relativos ("próxima terça", "amanhã", "hoje") se houver risco de ambiguidade.\n` +
       `- Não mostrar IDs internos [ref:...] ao paciente.\n\n` +
       `REGRAS DE AGENDAMENTO:\n` +
       `- DADOS OBRIGATÓRIOS PARA AGENDAR: nome (se não houver cadastro), convênio (apenas consulta dermatológica), data/hora, procedimento.\n` +
@@ -1003,18 +1022,24 @@ serve(async (req) => {
 
         } else if (toolCall.function.name === 'consultar_agendamentos') {
           try {
-            const nowIsoTool = new Date().toISOString();
+            const nowMsTool = Date.now();
+            const activeWindowStartIsoTool = new Date(nowMsTool - 24 * 60 * 60 * 1000).toISOString();
 
-            const { data: agendamentosAtivosFuturos, error: ativosError } = await supabaseAdmin
+            const { data: agendamentosAtivosRaw, error: ativosError } = await supabaseAdmin
               .from('agendamentos')
               .select('id, data_hora, status, observacao, paciente_nome, duracao_min')
               .eq('clinic_id', conversa.clinic_id)
               .eq('paciente_telefone', recipientPhone)
               .in('status', ['marcado', 'confirmado'])
-              .gte('data_hora', nowIsoTool)
+              .gte('data_hora', activeWindowStartIsoTool)
               .order('data_hora', { ascending: true });
 
             if (ativosError) throw new Error("Erro ao buscar agendamentos ativos: " + ativosError.message);
+
+            const agendamentosAtivosFuturos = (agendamentosAtivosRaw || []).filter((a: any) => {
+              const ts = parseIsoInputToDate(a.data_hora).getTime();
+              return Number.isFinite(ts) && ts >= nowMsTool;
+            });
 
             const { data: canceladosRecentes, error: canceladosError } = await supabaseAdmin
               .from('agendamentos')
@@ -1034,8 +1059,8 @@ serve(async (req) => {
               partes.push('Consultas ativas futuras: nenhuma.');
             } else {
               const listaAtivos = agendamentosAtivosFuturos.map((a: any, i: number) => {
-                const dt = new Date(a.data_hora);
-                const dataFormatada = formatDateTimeSP(dt);
+                const dt = parseIsoInputToDate(a.data_hora);
+                const dataFormatada = formatDateTimeSPWithWeekday(dt);
                 return `${i + 1}.Data: ${dataFormatada} | Procedimento: ${a.observacao || 'Consulta'} [ref: ${a.id}]`;
               }).join('\n');
               partes.push(`Consultas ativas futuras:\n${listaAtivos}`);
@@ -1050,7 +1075,7 @@ serve(async (req) => {
               partes.push(`Cancelamentos recentes:\n${listaCancelados}`);
             }
 
-            toolResponseText = `Status de consultas no sistema:\n${partes.join('\n\n')}\n\nIMPORTANTE: Ao responder ao paciente, nunca invente status. Se não houver consulta ativa futura, diga explicitamente que não há nada ativo para cancelar.`;
+            toolResponseText = `Status de consultas no sistema:\n${partes.join('\n\n')}\n\nIMPORTANTE: Ao responder ao paciente, nunca invente status. Se não houver consulta ativa futura, diga explicitamente que não há nada ativo para cancelar. Use exatamente as datas/horários e dia da semana informados aqui; não troque o dia da semana.`;
             console.log("Consulta de agendamentos realizada!");
           } catch (e: any) {
             console.error("Tool consultar_agendamentos failed:", e);
