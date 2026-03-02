@@ -779,6 +779,21 @@ serve(async (req) => {
       {
         type: "function",
         function: {
+          name: "cancelar_agendamento",
+          description: "Cancela um agendamento existente após o paciente confirmar qual consulta deseja cancelar.",
+          parameters: {
+            type: "object",
+            properties: {
+              agendamento_id: { type: "string", description: "ID do agendamento que deve ser cancelado." },
+              motivo: { type: "string", description: "Motivo do cancelamento informado pelo paciente." }
+            },
+            required: ["agendamento_id"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
           name: "reagendar_consulta",
           description: "Altera a data/hora de um agendamento existente. Use após consultar os agendamentos e o paciente informar a nova data.",
           parameters: {

@@ -14,6 +14,12 @@ serve(async (req) => {
     try {
         // 1. Authenticate User
         const authHeader = req.headers.get('Authorization');
+        if (!authHeader) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 401,
+            })
+        }
         const supabaseClient = createClient(
             Deno.env.get('SUPABASE_URL') ?? '',
             Deno.env.get('SUPABASE_ANON_KEY') ?? '',
@@ -35,26 +41,43 @@ serve(async (req) => {
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
         )
 
-        const { data: clinicasList, error: clinicaError } = await supabaseAdmin
-            .from('clinicas')
-            .select('id')
+        const { data: clinicMember, error: clinicMemberError } = await supabaseAdmin
+            .from('clinic_users')
+            .select('clinic_id, role')
             .eq('user_id', user.id)
-            .limit(1);
+            .in('role', ['owner', 'admin', 'doctor'])
+            .limit(1)
+            .maybeSingle();
 
-        if (clinicaError || !clinicasList || clinicasList.length === 0) {
+        if (clinicMemberError) {
+            throw clinicMemberError;
+        }
+
+        let clinicId = clinicMember?.clinic_id ?? null;
+        if (!clinicId) {
+            const { data: ownerClinic, error: ownerClinicError } = await supabaseAdmin
+                .from('clinicas')
+                .select('id')
+                .eq('user_id', user.id)
+                .limit(1)
+                .maybeSingle();
+
+            if (ownerClinicError) {
+                throw ownerClinicError;
+            }
+
+            clinicId = ownerClinic?.id ?? null;
+        }
+
+        if (!clinicId) {
             return new Response(JSON.stringify({ error: 'Clínica não encontrada.' }), {
                 headers: { ...corsHeaders, 'Content-Type': 'application/json' },
                 status: 404,
             })
         }
 
-        const clinicId = clinicasList[0].id;
-
-        // 3. Map clinic_id to Evolution API instance name
-        const CLINIC_TO_INSTANCE: Record<string, string> = {
-            '06a40c64-48a4-4836-a3ea-8a8ced0492e4': 'ca57fb17-5661-4c85-9d1a-853720c8acff',
-        };
-        const instanceName = CLINIC_TO_INSTANCE[clinicId] || clinicId;
+        // 3. Instance name in Evolution API follows clinic UUID
+        const instanceName = clinicId;
 
         // 4. Call Evolution API to logout
         const evolutionUrl = Deno.env.get('EVOLUTION_API_URL');
@@ -89,9 +112,10 @@ serve(async (req) => {
             status: 200,
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
         console.error("Disconnect Error:", error);
-        return new Response(JSON.stringify({ error: error.message || String(error) }), {
+        return new Response(JSON.stringify({ error: message }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             status: 500,
         })

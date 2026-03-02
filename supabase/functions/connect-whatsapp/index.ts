@@ -16,6 +16,12 @@ serve(async (req) => {
     try {
         // 1. Authenticate User
         const authHeader = req.headers.get('Authorization');
+        if (!authHeader) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 401,
+            })
+        }
         console.log("Auth header received:", authHeader ? "Present" : "Missing");
 
         const supabaseClient = createClient(
@@ -41,20 +47,53 @@ serve(async (req) => {
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
         )
 
-        const { data: clinicasList, error: clinicaError } = await supabaseAdmin
-            .from('clinicas')
-            .select('*')
+        const { data: clinicMember, error: clinicMemberError } = await supabaseAdmin
+            .from('clinic_users')
+            .select('clinic_id, role')
             .eq('user_id', user.id)
-            .limit(1);
+            .in('role', ['owner', 'admin', 'doctor'])
+            .limit(1)
+            .maybeSingle();
 
-        if (clinicaError || !clinicasList || clinicasList.length === 0) {
+        if (clinicMemberError) {
+            throw clinicMemberError;
+        }
+
+        let clinicId = clinicMember?.clinic_id ?? null;
+        if (!clinicId) {
+            const { data: ownerClinic, error: ownerClinicError } = await supabaseAdmin
+                .from('clinicas')
+                .select('id')
+                .eq('user_id', user.id)
+                .limit(1)
+                .maybeSingle();
+
+            if (ownerClinicError) {
+                throw ownerClinicError;
+            }
+
+            clinicId = ownerClinic?.id ?? null;
+        }
+
+        if (!clinicId) {
             return new Response(JSON.stringify({ error: 'Clínica não encontrada para este usuário.' }), {
                 headers: { ...corsHeaders, 'Content-Type': 'application/json' },
                 status: 404,
             })
         }
 
-        const clinica = clinicasList[0];
+        const { data: clinica, error: clinicaError } = await supabaseAdmin
+            .from('clinicas')
+            .select('*')
+            .eq('id', clinicId)
+            .maybeSingle();
+
+        if (clinicaError || !clinica) {
+            return new Response(JSON.stringify({ error: 'Clínica não encontrada para este usuário.' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 404,
+            })
+        }
         const instanceName = clinica.id; // Using UUID as Instance Name for uniqueness
 
         // 3. Evolution API Configuration
@@ -182,9 +221,10 @@ serve(async (req) => {
             });
         }
 
-    } catch (error: any) {
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
         console.error("Connect Error:", error);
-        return new Response(JSON.stringify({ error: error.message || String(error) }), {
+        return new Response(JSON.stringify({ error: message }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             status: 500,
         })
