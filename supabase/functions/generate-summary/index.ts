@@ -126,6 +126,18 @@ serve(async (req) => {
       });
     }
 
+    const { data: canEditEncounter, error: permissionError } = await supabaseAuth.rpc("current_user_has_permission", {
+      p_clinic_id: clinicId,
+      p_permission: "encounters.edit",
+    });
+
+    if (permissionError || !canEditEncounter) {
+      return new Response(JSON.stringify({ error: "Sem permissão para editar prontuário" }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const pacienteNome = (atendimento as { pacientes?: { nome?: string } | null }).pacientes?.nome || "Paciente";
     const clinicalContext = `Paciente: ${pacienteNome}\n\nQueixa Principal: ${(atendimento as { queixa_principal?: string | null }).queixa_principal || "Não informada"}\n\nAnamnese: ${(atendimento as { anamnese?: string | null }).anamnese || "Não informada"}\n\nEvolução: ${(atendimento as { evolucao?: string | null }).evolucao || "Não informada"}\n\nConduta: ${(atendimento as { conduta?: string | null }).conduta || "Não informada"}`;
 
