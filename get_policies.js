@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { Client } = require('./db_setup/node_modules/pg');
+const { Client } = require('pg');
 
 const envFile = fs.readFileSync('.env.local', 'utf8');
 let dbUrl = '';
